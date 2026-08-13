@@ -11,7 +11,7 @@
       [
         "expo-router",
         {
-          "origin": "https://your-vercel-domain.vercel.app",
+          "origin": "https://karma-sms.vercel.app",
           "root": "./src/app"
         }
       ]

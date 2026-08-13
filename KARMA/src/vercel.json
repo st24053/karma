@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "KARMA",
+    "slug": "karma",
+    "scheme": "karma",
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://your-vercel-domain.vercel.app",
+          "root": "./src/app"
+        }
+      ]
+    ]
+  }
+}

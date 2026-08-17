@@ -94,7 +94,6 @@ export default function TeacherLayout() {
           .select('teacher_code')
           .eq('teacher_email', email)
           .maybeSingle();
-        console.log(teacherData)
         if (teacherError || !teacherData?.teacher_code) {
           console.warn('Unauthorized access attempt or email not found in teacher database:', email);
           // Sign out or redirect if email is not verified in the database

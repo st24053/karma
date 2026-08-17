@@ -5,16 +5,12 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '../../constants/theme'; 
 import { useAuth } from '../../_context'; 
-import { supabase } from '@/lib/supabase'; // Adjust path to your Supabase client
+import { supabase } from '@/lib/supabase';
 import { 
   Home, 
   Settings, 
-  User, 
   CalendarCheck, 
-  HeartPulse, 
-  GraduationCap, 
-  UsersRound, 
-  FileSpreadsheet 
+  GraduationCap
 } from 'lucide-react-native';
 
 function NavButton({ item, isActive, currentColors }: { item: any; isActive: boolean; currentColors: any }) {
@@ -55,7 +51,7 @@ function NavButton({ item, isActive, currentColors }: { item: any; isActive: boo
     >
       <Animated.View style={[styles.navLink, { backgroundColor: animatedBackgroundColor }]}>
         <IconComponent 
-          size={20} 
+          size={22} 
           color={isActive ? currentColors.textSelected : currentColors.text} 
         />
         <ThemedText style={[styles.linkText, { color: isActive ? currentColors.textSelected : currentColors.text }]}>
@@ -72,134 +68,181 @@ export default function StudentLayout() {
   
   const currentColors = Colors[colorScheme];
   const pathname = usePathname();
-  const { email } = useAuth(); // Active logged-in user email
+  const { email } = useAuth();
 
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
 
   useEffect(() => {
-  async function loadStudentPhoto() {
-    if (!email) return;
+    async function loadStudentPhoto() {
+      if (!email) return;
 
-    try {
-      const { data: student, error: studentError } = await supabase
-        .from('student_personal_information')
-        .select('student_id')
-        .eq('email', email)
-        .maybeSingle();
+      try {
+        const { data: student, error: studentError } = await supabase
+          .from('student_personal_information')
+          .select('student_id')
+          .eq('email', email)
+          .maybeSingle();
 
-      if (studentError) {
-        console.error('DB Query Error:', studentError);
-        return;
+        if (studentError || !student?.student_id) return;
+
+        const { data: storageData, error: storageError } = await supabase
+          .storage
+          .from('id_photos')
+          .createSignedUrl(`students/${student.student_id}.jpg`, 3600);
+
+        if (!storageError && storageData?.signedUrl) {
+          setPhotoUrl(storageData.signedUrl);
+        }
+      } catch (err) {
+        console.error('Unexpected error fetching student photo:', err);
       }
-
-      if (!student?.student_id) {
-        console.warn('No student record found for email:', email);
-        return;
-      }
-
-
-      const fileKey = `${student.student_id}.jpg`;
-
-      const { data: storageData, error: storageError } = await supabase
-        .storage
-        .from('id_photos')
-        .createSignedUrl(`students/${student.student_id}.jpg`, 3600);
-
-      if (storageError) {
-        console.error('Storage Signed URL Error:', storageError);
-        return;
-      }
-
-      if (storageData?.signedUrl) {
-        setPhotoUrl(storageData.signedUrl);
-      }
-    } catch (err) {
-      console.error('Unexpected error fetching student photo:', err);
     }
-  }
 
-  loadStudentPhoto();
-}, [email]);
+    loadStudentPhoto();
+  }, [email]);
 
   const navItems = [
     { label: 'Home', href: '/student/dashboard', icon: Home },
     { label: 'Attendance', href: '/student/attendance', icon: CalendarCheck },
     { label: 'Grades', href: '/student/grades', icon: GraduationCap },
-    { label: 'Reports', href: '/student/reports', icon: FileSpreadsheet },
-    { label: 'Clubs', href: '/student/clubs', icon: UsersRound },
-    { label: 'Health', href: '/student/health', icon: HeartPulse },
-    { label: 'Profile', href: '/student/profile', icon: User },
     { label: 'Settings', href: '/student/settings', icon: Settings },
   ];
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <View style={[styles.container, { backgroundColor: currentColors.background }]}>
-        
-        <ThemedView type="backgroundElement" style={styles.sidebar}>  
-          <View style={styles.headerArea}>
-            <ThemedText style={[styles.logoText, { color: currentColors.text }]}>
-              KARMA
-            </ThemedText>
-            
-            <View style={styles.imageRow}>
-              {/* Load dynamic signed URL, fallback to local default pfp */}
-              <Image 
-                source={
-                  photoUrl 
-                    ? { uri: photoUrl }
-                    : require('../../../assets/images/pfp.jpg')
-                }
-                style={styles.profilePic} 
-              />
-              <View style={[styles.verticalDivider, { backgroundColor: currentColors.textSecondary }]} />
-              <Image 
-                source={require('../../../assets/images/osc_logo.png')}
-                style={styles.logoImg} 
-              />
+      <View style={[styles.wrapper, { backgroundColor: currentColors.background }]}>
+        <View style={styles.container}>
+          
+          <ThemedView type="backgroundElement" style={styles.sidebar}>  
+            <View style={styles.headerArea}>
+              <ThemedText style={[styles.logoText, { color: currentColors.text }]}>
+                KARMA
+              </ThemedText>
+              
+              <View style={styles.imageRow}>
+                <Image 
+                  source={
+                    photoUrl 
+                      ? { uri: photoUrl }
+                      : require('../../../assets/images/pfp.jpg')
+                  }
+                  style={styles.profilePic} 
+                />
+                <View style={[styles.verticalDivider, { backgroundColor: currentColors.textSecondary }]} />
+                <Image 
+                  source={require('../../../assets/images/osc_logo.png')}
+                  style={styles.logoImg} 
+                />
+              </View>
+
+              {email && (
+                <ThemedText style={[styles.emailDisplay, { color: currentColors.textSecondary }]}>
+                  {email}
+                </ThemedText>
+              )}
             </View>
 
-            {email && (
-              <ThemedText style={[styles.emailDisplay, { color: currentColors.textSecondary }]}>
-                {email}
-              </ThemedText>
-            )}
-          </View>
+            <View style={styles.navLinksContainer}>
+              {navItems.map((item) => (
+                <NavButton 
+                  key={item.href}
+                  item={item}
+                  isActive={pathname === item.href}
+                  currentColors={currentColors}
+                />
+              ))}
+            </View>
+          </ThemedView>
 
-          <View style={styles.navLinksContainer}>
-            {navItems.map((item) => (
-              <NavButton 
-                key={item.href}
-                item={item}
-                isActive={pathname === item.href}
-                currentColors={currentColors}
-              />
-            ))}
+          <View style={styles.content}>
+            <Slot />
           </View>
-        </ThemedView>
-
-        <View style={styles.content}>
-          <Slot />
+          
         </View>
-        
       </View>
     </ThemeProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, flexDirection: 'row' },
-  sidebar: { width: 260, padding: Spacing.four, gap: Spacing.five },
-  headerArea: { alignItems: 'center', justifyContent: 'center', gap: Spacing.three, marginBottom: Spacing.two },
-  imageRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
-  profilePic: { width: 80, height: 80, borderRadius: 40 },
-  verticalDivider: { width: 1, height: 36, marginHorizontal: Spacing.four },
-  logoImg: { width: 80, height: 80, resizeMode: 'contain' },
-  logoText: { fontWeight: '800', fontSize: 26, letterSpacing: 2, textAlign: 'center' },
-  emailDisplay: { fontSize: 13, fontWeight: '500', marginTop: Spacing.one, textAlign: 'center' },
-  navLinksContainer: { gap: Spacing.two },
-  navLinkContainer: { borderRadius: Spacing.two, overflow: 'hidden' },
-  navLink: { flexDirection: 'row', alignItems: 'center', paddingVertical: Spacing.three, paddingHorizontal: Spacing.three, borderRadius: Spacing.two, gap: Spacing.three },
-  linkText: { fontSize: 15, fontWeight: '500' },
-  content: { flex: 1 },
+  wrapper: {
+    flex: 1,
+    width: '100%',
+  },
+  container: { 
+    flex: 1, 
+    flexDirection: 'row',
+    width: '100%',
+    maxWidth: 1440,
+    marginHorizontal: 'auto',
+  },
+  sidebar: { 
+    width: '20%',
+    minWidth: 220,
+    maxWidth: 280,
+    flexShrink: 0,
+    padding: Spacing.four, 
+    gap: Spacing.five 
+  },
+  headerArea: { 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    gap: Spacing.three, 
+    marginBottom: Spacing.two 
+  },
+  imageRow: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'center' 
+  },
+  profilePic: { 
+    width: 72, 
+    height: 72, 
+    borderRadius: 36 
+  },
+  verticalDivider: { 
+    width: 1, 
+    height: 36, 
+    marginHorizontal: Spacing.three 
+  },
+  logoImg: { 
+    width: 72, 
+    height: 72, 
+    resizeMode: 'contain' 
+  },
+  logoText: { 
+    fontWeight: '800', 
+    fontSize: 28, 
+    letterSpacing: 2, 
+    textAlign: 'center' 
+  },
+  emailDisplay: { 
+    fontSize: 14, 
+    fontWeight: '500', 
+    marginTop: Spacing.one, 
+    textAlign: 'center' 
+  },
+  navLinksContainer: { 
+    gap: Spacing.two 
+  },
+  navLinkContainer: { 
+    borderRadius: Spacing.two, 
+    overflow: 'hidden' 
+  },
+  navLink: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    paddingVertical: 12, 
+    paddingHorizontal: 14, 
+    borderRadius: Spacing.two, 
+    gap: Spacing.three 
+  },
+  linkText: { 
+    fontSize: 16, 
+    fontWeight: '600' 
+  },
+  content: { 
+    flex: 1,
+    minWidth: 0,
+  },
 });

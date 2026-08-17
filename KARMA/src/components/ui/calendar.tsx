@@ -2,11 +2,11 @@ import React, { useMemo, useState, useEffect } from 'react';
 import { StyleSheet, View, useColorScheme, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Spacing } from '@/constants/theme';
-import { ChevronLeft, ChevronRight } from 'lucide-react-native';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase'; // Adjust path to your Supabase client instance
 import { useAuth } from '../../_context';
 
-type TimetableLine = 'Line 1' | 'Line 2' | 'Line 3' | 'Line 4' | 'Line 5' | 'Line 6' | 'Line 7' | 'Line 8' | 'Line 9';
+type TimetableLine = 'Line 1' | 'Line 2' | 'Line 3' | 'Line 4' | 'Line 5' | 'Line 6' | 'Line 7' | 'Line 8' | 'Line 9' | 'Line 10' | 'Line 11' | 'Line 12';
 type AttendanceStatus = 'present' | 'late' | 'unjustified_absent' | 'justified_absent' | 'exam_leave' | 'none' | string;
 
 interface MasterSlot {
@@ -19,7 +19,6 @@ interface MasterSlot {
 interface ClassRecord {
   id: number;
   subject: string;
-  subject_code: string;
   level: number;
   line: string;
   teacher_code: string;
@@ -65,15 +64,18 @@ interface LineConfig {
 }
 
 const DEFAULT_LINES_CONFIG: Record<TimetableLine, LineConfig> = {
-  'Line 1': { name: 'Line 1', color: '#F3E8FF', darkColor: '#2D2245' },
-  'Line 2': { name: 'Line 2', color: '#DBEAFE', darkColor: '#1E2E4A' },
-  'Line 3': { name: 'Line 3', color: '#FEE2E2', darkColor: '#3C2020' },
-  'Line 4': { name: 'Line 4', color: '#FEF08A', darkColor: '#3A361A' },
-  'Line 5': { name: 'Line 5', color: '#D1FAE5', darkColor: '#143324' },
-  'Line 6': { name: 'Line 6', color: '#FEF3C7', darkColor: '#3A311D' },
-  'Line 7': { name: 'Line 7', color: '#FEF3C7', darkColor: '#3A311D' },
-  'Line 8': { name: 'Line 8', color: '#E0F2FE', darkColor: '#0C4A6E' },
-  'Line 9': { name: 'Line 9', color: '#FCE7F3', darkColor: '#4A044E' },
+  'Line 1':  { name: 'Line 1',  color: '#F3E8FF', darkColor: '#2D2245' }, // Purple
+  'Line 2':  { name: 'Line 2',  color: '#DBEAFE', darkColor: '#1E2E4A' }, // Blue
+  'Line 3':  { name: 'Line 3',  color: '#FEE2E2', darkColor: '#3C2020' }, // Red
+  'Line 4':  { name: 'Line 4',  color: '#FEF08A', darkColor: '#423200' }, // Bright Yellow
+  'Line 5':  { name: 'Line 5',  color: '#D1FAE5', darkColor: '#143324' }, // Green
+  'Line 6':  { name: 'Line 6',  color: '#FEF3C7', darkColor: '#362405' }, // Toasted Amber / Ochre
+  'Line 7':  { name: 'Line 7',  color: '#E0E7FF', darkColor: '#1E1B4B' }, // Indigo
+  'Line 8':  { name: 'Line 8',  color: '#E0F2FE', darkColor: '#0C4A6E' }, // Sky Blue
+  'Line 9':  { name: 'Line 9',  color: '#FCE7F3', darkColor: '#4A044E' }, // Pink
+  'Line 10': { name: 'Line 10', color: '#FFEDD5', darkColor: '#431407' }, // Orange
+  'Line 11': { name: 'Line 11', color: '#CCFBF1', darkColor: '#042F2E' }, // Teal
+  'Line 12': { name: 'Line 12', color: '#F1F5F9', darkColor: '#1E293B' }, // Slate
 };
 
 export interface CalendarProps {
@@ -87,7 +89,8 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
   const systemScheme = useColorScheme();
   const colorScheme = (systemScheme === 'dark' ? 'dark' : 'light') as 'light' | 'dark';
   const currentColors = Colors[colorScheme];
-
+  const circleBgColor = colorScheme === 'dark' ? '#334155' : '#E2E8F0';
+  const circleTextColor = currentColors.text;
   const gridLines = ['9:00', '9:30', '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30'];
 
   const [calendarDays, setCalendarDays] = useState<CalendarDayRecord[]>([]);
@@ -101,7 +104,6 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
 
   // Real-time Date & Time State for current time red line
   const [now, setNow] = useState(new Date());
-
   useEffect(() => {
     const timer = setInterval(() => {
       setNow(new Date());
@@ -156,7 +158,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
           .select('student_id')
           .eq('email', userEmail)
           .maybeSingle();
-  
+
         if (studentError || !studentInfo?.student_id) {
           throw new Error(`Could not find student ID corresponding to "${userEmail}".`);
         }
@@ -202,11 +204,11 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
 
           const formattedDays: CalendarDayRecord[] = dbCalendar.map((item) => {
             const parts = item.date.split('-');
-            const dateObj = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+            const dateObj = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
 
             return {
               date: item.date,
-              dayLabel: dayLabels[dateObj.getDay()] || 'Mon',
+              dayLabel: dayLabels[dateObj.getUTCDay()] || 'Mon',
               timetableDay: item.day,
               week: item.week,
               term: item.term,
@@ -217,12 +219,21 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
 
           const todayStr = new Date().toISOString().split('T')[0];
           const todayIdx = formattedDays.findIndex((d) => d.date === todayStr);
+
           if (todayIdx !== -1) {
             setDayIndex(todayIdx);
             setWeekIndex(Math.floor(todayIdx / 5));
           } else {
-            setDayIndex(0);
-            setWeekIndex(0);
+            const nextAvailableIdx = formattedDays.findIndex((d) => d.date > todayStr);
+
+            if (nextAvailableIdx !== -1) {
+              setDayIndex(nextAvailableIdx);
+              setWeekIndex(Math.floor(nextAvailableIdx / 5));
+            } else {
+              const lastIdx = Math.max(0, formattedDays.length - 1);
+              setDayIndex(lastIdx);
+              setWeekIndex(Math.floor(lastIdx / 5));
+            }
           }
         }
 
@@ -234,7 +245,6 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
             classes!class_id (
               id,
               subject,
-              subject_code,
               level,
               line,
               teacher_code,
@@ -245,7 +255,6 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
           .eq('student_id', studentInfo.student_id);
 
         if (classError) throw classError;
-
         const updatedLines = { ...DEFAULT_LINES_CONFIG };
         if (enrolledClasses) {
           (enrolledClasses as unknown as ClassStudentJoin[]).forEach((item) => {
@@ -256,7 +265,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
               if (updatedLines[lineKey]) {
                 updatedLines[lineKey] = {
                   ...updatedLines[lineKey],
-                  name: cls.subject_code,
+                  name: (cls.subject + (cls.level ? ` (L${cls.level})` : '')).trim(),
                   teacher: cls.teacher_code,
                   isBreak: cls.is_break,
                   room: cls.room,
@@ -271,7 +280,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
           .from('attendance')
           .select('date, line, status')
           .eq('student_id', studentInfo.student_id);
-        console.log('Fetched attendance records:', attendanceRecords);
+
         if (!attendanceError && attendanceRecords) {
           const attendanceMap: Record<string, Record<string, AttendanceStatus>> = {};
           attendanceRecords.forEach((record: AttendanceRecord) => {
@@ -288,7 +297,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
         setLoading(false);
       }
     }
-
+    
     if (userEmail) {
       loadDatabaseData();
     }
@@ -323,6 +332,22 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
       setDayIndex((prev) => Math.min(calendarDays.length - 1, prev + 1));
     } else {
       setWeekIndex((prev) => Math.min(totalWeeks - 1, prev + 1));
+    }
+  };
+
+  const handleFastPrev = () => {
+    if (mode === 'day') {
+      setDayIndex((prev) => Math.max(0, prev - 10));
+    } else {
+      setWeekIndex((prev) => Math.max(0, prev - 10));
+    }
+  };
+
+  const handleFastNext = () => {
+    if (mode === 'day') {
+      setDayIndex((prev) => Math.min(calendarDays.length - 1, prev + 10));
+    } else {
+      setWeekIndex((prev) => Math.min(totalWeeks - 1, prev + 10));
     }
   };
 
@@ -369,7 +394,6 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
     });
   };
 
-  // Helper to calculate current time line positioning
   const getCurrentTimeIndicator = (dateStr: string) => {
     const todayStr = now.toISOString().split('T')[0];
     if (dateStr !== todayStr) return null;
@@ -380,13 +404,11 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
     const ROW_HEIGHT_PER_30_MIN = 100;
     const MINUTE_HEIGHT_RATIO = ROW_HEIGHT_PER_30_MIN / 30;
 
-    // Check if current time falls within timetable operational hours
     if (currentMinutes < START_ANCHOR_MINUTES || currentMinutes > END_ANCHOR_MINUTES) {
       return null;
     }
 
-    const calculatedTop = (currentMinutes - START_ANCHOR_MINUTES) * MINUTE_HEIGHT_RATIO;
-    return calculatedTop;
+    return (currentMinutes - START_ANCHOR_MINUTES) * MINUTE_HEIGHT_RATIO;
   };
 
   const formattedDateTitle = (dateStr: string) => {
@@ -428,6 +450,10 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
 
         <View style={styles.timetableSubHeaderCentered}>
           <View style={styles.dateNavigationTight}>
+            <TouchableOpacity onPress={handleFastPrev} style={styles.navButtonPadding}>
+              <ChevronsLeft size={22} color={currentColors.text} />
+            </TouchableOpacity>
+
             <TouchableOpacity onPress={handlePrev} style={styles.navButtonPadding}>
               <ChevronLeft size={22} color={currentColors.text} />
             </TouchableOpacity>
@@ -444,21 +470,58 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
             <TouchableOpacity onPress={handleNext} style={styles.navButtonPadding}>
               <ChevronRight size={22} color={currentColors.text} />
             </TouchableOpacity>
+
+            <TouchableOpacity onPress={handleFastNext} style={styles.navButtonPadding}>
+              <ChevronsRight size={22} color={currentColors.text} />
+            </TouchableOpacity>
           </View>
         </View>
       </View>
 
-      {/* --- WEEK NAVIGATION HEADERS --- */}
-      {mode === 'week' && activeWeekDays.length > 0 && (
-        <View style={styles.weekDaysHeaderRow}>
-          <View style={styles.timeAxisSpacer} />
-          {activeWeekDays.map((dayObj, index) => (
-            <View key={index} style={styles.weekDayHeaderCell}>
-              <ThemedText style={[styles.weekDayHeaderText, { color: currentColors.text }]}>{dayObj.dayLabel}</ThemedText>
-              <ThemedText style={{ fontSize: 11, fontWeight: '700', color: currentColors.textSecondary }}>Day {dayObj.timetableDay}</ThemedText>
-            </View>
-          ))}
+      {/* --- DAY / WEEK CIRCLED HEADER --- */}
+      {mode === 'day' ? (
+        <View style={styles.singleDayHeaderRow}>
+          <View style={styles.dayHeaderCell}>
+            <ThemedText style={[styles.weekDayHeaderText, activeDayRecord.date === todayStr ? styles.todayDayHeaderText : { color: currentColors.text }]}>
+              {activeDayRecord.dayLabel}
+            </ThemedText>
+            <ThemedText style={{ fontSize: 11, fontWeight: '700', color: currentColors.textSecondary }}>
+              Day {activeDayRecord.timetableDay}
+            </ThemedText>
+          </View>
         </View>
+      ) : (
+        activeWeekDays.length > 0 && (
+          <View style={styles.weekDaysHeaderRow}>
+            {activeWeekDays.map((dayObj, index) => {
+              const isSelectedOrToday = dayObj.date === activeDayRecord.date || dayObj.date === todayStr;
+              return (
+                <View key={index} style={styles.dayHeaderCell}>
+                  <View
+                    style={[
+                      styles.dayLabelCircle,
+                      isSelectedOrToday && { backgroundColor: circleBgColor },
+                    ]}
+                  >
+                    <ThemedText
+                      style={[
+                        styles.weekDayHeaderText,
+                        isSelectedOrToday
+                          ? { color: circleTextColor }
+                          : { color: currentColors.text },
+                      ]}
+                    >
+                      {dayObj.dayLabel}
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={{ fontSize: 11, fontWeight: '700', color: currentColors.textSecondary }}>
+                    Day {dayObj.timetableDay}
+                  </ThemedText>
+                </View>
+              );
+            })}
+          </View>
+        )
       )}
 
       {/* --- BASE LAYOUT CANVAS --- */}
@@ -474,10 +537,10 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
           ))}
         </View>
 
-        {/* --- DYNAMIC EVENT BLOCKS OVERLAY --- */}
+        {/* --- EVENT COLUMNS LAYOUT OVERLAY --- */}
         <View style={styles.eventsOverlayContainer}>
           {mode === 'day' ? (
-            <>
+            <View style={styles.dayColumnContainer}>
               {computePositionsForDay(activeDayRecord.timetableDay, activeDayRecord.date).map((event) => (
                 <View 
                   key={event.id} 
@@ -486,20 +549,15 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                     { 
                       top: event.top, 
                       height: event.height, 
-                      left: 0,
-                      right: '12%',
                       backgroundColor: colorScheme === 'dark' ? event.darkColor : event.color,
                       borderStyle: event.isBreak ? 'dashed' : 'solid',
                       borderWidth: event.isBreak ? 1 : 0,
                       borderColor: colorScheme === 'dark' ? '#475569' : '#CBD5E1',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
-                      alignItems: 'stretch',
                     }
                   ]}
                 >
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <View style={{ flex: 1, alignItems: 'flex-start' }}>
+                  <View style={styles.cardHeaderRow}>
+                    <View style={styles.flexOneLeft}>
                       <ThemedText numberOfLines={1} style={[styles.eventName, { color: colorScheme === 'dark' ? '#FFFFFF' : '#1E293B' }]}>
                         {event.name}
                       </ThemedText>
@@ -508,7 +566,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                       </ThemedText>
                     </View>
 
-                    <View style={{ alignItems: 'flex-end' }}>
+                    <View style={styles.alignRight}>
                       {!event.isBreak && (
                         <>
                           <ThemedText style={[styles.roomText, { color: colorScheme === 'dark' ? '#94A3B8' : '#475569' }]}>{event.room}</ThemedText>
@@ -518,7 +576,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                     </View>
                   </View>
 
-                  <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', minHeight: 12 }}>
+                  <View style={styles.cardFooterRow}>
                     {!event.isBreak && event.statusColor !== 'transparent' && (
                       <View style={[styles.attendanceStatusDot, { backgroundColor: event.statusColor }]} />
                     )}
@@ -526,17 +584,20 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                 </View>
               ))}
 
-              {/* RED CURRENT TIME/DATE LINE (DAY MODE) */}
+              {/* CURRENT TIME INDICATOR (DAY MODE) */}
               {activeDayTimeTop !== null && (
                 <View style={[styles.currentTimeIndicatorLine, { top: activeDayTimeTop, left: 0, right: 0 }]}>
                   <View style={styles.currentTimeDot} />
                 </View>
               )}
-            </>
+            </View>
           ) : (
-            <>
-              {activeWeekDays.map((dayObj, dIdx) => {
+            <View style={styles.weekColumnsContainer}>
+              {activeWeekDays.map((dayObj) => {
                 const dayEvents = computePositionsForDay(dayObj.timetableDay, dayObj.date);
+                const isCurrentWeekDay = dayObj.date === todayStr;
+                const weekDayTimeTop = isCurrentWeekDay ? getCurrentTimeIndicator(todayStr) : null;
+
                 return (
                   <View key={dayObj.date} style={styles.weekColumnSegment}>
                     {dayEvents.map((event) => (
@@ -547,23 +608,18 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                           { 
                             top: event.top, 
                             height: event.height, 
-                            left: `${dIdx * 20}%`,
-                            width: '19%',
                             backgroundColor: colorScheme === 'dark' ? event.darkColor : event.color,
                             borderStyle: event.isBreak ? 'dashed' : 'solid',
                             borderWidth: event.isBreak ? 1 : 0,
                             borderColor: colorScheme === 'dark' ? '#475569' : '#CBD5E1',
-                            paddingHorizontal: Spacing.two,
-                            paddingVertical: Spacing.two,
-                            flexDirection: 'column',
-                            justifyContent: 'space-between',
-                            alignItems: 'stretch',
+                            paddingHorizontal: 4,
+                            paddingVertical: 4,
                           }
                         ]}
                       >
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
-                          <View style={{ flex: 1, alignItems: 'flex-start' }}>
-                            <ThemedText numberOfLines={1} style={[styles.eventName, { fontSize: 13, lineHeight: 15, color: colorScheme === 'dark' ? '#FFFFFF' : '#1E293B' }]}>
+                        <View style={styles.cardHeaderRow}>
+                          <View style={styles.flexOneLeft}>
+                            <ThemedText numberOfLines={1} style={[styles.eventName, { fontSize: 12, lineHeight: 14, color: colorScheme === 'dark' ? '#FFFFFF' : '#1E293B' }]}>
                               {event.name}
                             </ThemedText>
                             <ThemedText numberOfLines={2} style={[styles.eventTimeBreakText, { fontSize: 9, lineHeight: 11, color: colorScheme === 'dark' ? '#94A3B8' : '#64748B' }]}>
@@ -571,7 +627,7 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                             </ThemedText>
                           </View>
 
-                          <View style={{ alignItems: 'flex-end' }}>
+                          <View style={styles.alignRight}>
                             {!event.isBreak && (
                               <>
                                 <ThemedText numberOfLines={1} style={[styles.roomText, { fontSize: 10, lineHeight: 12, color: colorScheme === 'dark' ? '#94A3B8' : '#475569' }]}>{event.room}</ThemedText>
@@ -581,33 +637,24 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
                           </View>
                         </View>
 
-                        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', minHeight: 10 }}>
+                        <View style={styles.cardFooterRow}>
                           {!event.isBreak && event.statusColor !== 'transparent' && (
-                            <View style={[styles.attendanceStatusDot, { backgroundColor: event.statusColor, width: 9, height: 9, borderRadius: 4.5 }]} />
+                            <View style={[styles.attendanceStatusDot, { backgroundColor: event.statusColor, width: 8, height: 8, borderRadius: 4 }]} />
                           )}
                         </View>
                       </View>
                     ))}
+
+                    {/* CURRENT TIME INDICATOR (WEEK MODE) */}
+                    {weekDayTimeTop !== null && (
+                      <View style={[styles.currentTimeIndicatorLine, { top: weekDayTimeTop, left: 0, right: 0 }]}>
+                        <View style={styles.currentTimeDot} />
+                      </View>
+                    )}
                   </View>
                 );
               })}
-
-              {/* RED CURRENT TIME/DATE LINE (WEEK MODE) */}
-              {activeWeekTimeTop !== null && activeWeekDayIndex !== -1 && (
-                <View 
-                  style={[
-                    styles.currentTimeIndicatorLine, 
-                    { 
-                      top: activeWeekTimeTop, 
-                      left: `${activeWeekDayIndex * 20}%`, 
-                      width: '19%' 
-                    }
-                  ]}
-                >
-                  <View style={styles.currentTimeDot} />
-                </View>
-              )}
-            </>
+            </View>
           )}
         </View>
       </View>
@@ -617,150 +664,172 @@ export function Calendar({ mode, attendanceRecords: externalRecords }: CalendarP
 
 const styles = StyleSheet.create({
   calendarContainer: {
-    width: '100%',
+    flex: 1,
   },
   centeredLoading: {
-    paddingVertical: 40,
     justifyContent: 'center',
     alignItems: 'center',
+    minHeight: 200,
   },
   timetableHeaderBorder: {
     borderBottomWidth: 1,
-    paddingBottom: Spacing.three,
-    marginBottom: Spacing.three,
+    paddingBottom: 12,
+    marginBottom: 8,
   },
   blockTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    letterSpacing: -0.3,
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 4,
   },
   timetableSubHeaderCentered: {
-    flexDirection: 'row',
-    justifyContent: 'center',
     alignItems: 'center',
-    gap: Spacing.three,
-    marginTop: Spacing.three,
+    justifyContent: 'center',
   },
   dateNavigationTight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.four,
+    justifyContent: 'center',
   },
   navButtonPadding: {
-    padding: Spacing.one,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   dateTextUnified: {
-    fontSize: 15,
-    fontWeight: '700',
-    minWidth: 240,
-    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  singleDayHeaderRow: {
+    flexDirection: 'row',
+    paddingLeft: 60,
+    marginBottom: 6,
   },
   weekDaysHeaderRow: {
     flexDirection: 'row',
-    marginBottom: Spacing.two,
+    paddingLeft: 60,
+    marginBottom: 6,
   },
-  timeAxisSpacer: {
-    width: 55,
-  },
-  weekDayHeaderCell: {
+  dayHeaderCell: {
     flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dayLabelCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  todayLabelCircle: {
+  },
+  todayDayHeaderText: {
   },
   weekDayHeaderText: {
-    fontSize: 15,
-    fontWeight: '800',
+    fontSize: 13,
+    fontWeight: '700',
   },
   calendarBoardWrapper: {
     position: 'relative',
-    height: 1300,
-    width: '100%',
-    marginTop: Spacing.two,
+    height: 1400, // 14 half-hour slots * 100 height per 30 min
   },
   slotLineRow: {
-    flexDirection: 'row',
     height: 100,
+    flexDirection: 'row',
     alignItems: 'flex-start',
+    borderTopWidth: 1,
   },
   timeAxisLabelContainer: {
     width: 55,
-    paddingTop: 2,
+    marginTop: -8,
   },
   timeMarker: {
-    fontSize: 14,
-    fontWeight: '800',
+    fontSize: 11,
+    fontWeight: '600',
   },
   horizontalLineExtended: {
     flex: 1,
-    height: 1,
-    borderBottomWidth: 1,
-    borderColor: 'inherit',
-    opacity: 0.8,
   },
   eventsOverlayContainer: {
-    position: 'absolute',
-    top: 10, 
-    left: 55,
-    right: 0,
-    bottom: 0,
+    ...StyleSheet.absoluteFill,
+    paddingLeft: 60,
+  },
+  dayColumnContainer: {
+    flex: 1,
+    position: 'relative',
+    marginRight: 8,
+  },
+  weekColumnsContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: 4,
+    paddingRight: 4,
   },
   weekColumnSegment: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
+    flex: 1,
+    position: 'relative',
   },
   calendarFloatingCard: {
     position: 'absolute',
-    borderRadius: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
+    left: 0,
+    right: 0,
+    borderRadius: 6,
+    padding: 6,
+    justifyContent: 'space-between',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 2,
+  },
+  flexOneLeft: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  alignRight: {
+    alignItems: 'flex-end',
+  },
+  cardFooterRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'flex-end',
+    minHeight: 10,
   },
   eventName: {
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '700',
-    lineHeight: 17,
   },
   eventTimeBreakText: {
-    fontSize: 11,
-    fontWeight: '600',
-    lineHeight: 13,
-    marginTop: 2,
+    fontSize: 10,
+    fontWeight: '500',
   },
   roomText: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '700',
-    lineHeight: 15,
   },
   teacherText: {
-    fontSize: 11,
-    fontWeight: '600',
-    opacity: 0.8,
-    lineHeight: 14, 
+    fontSize: 9,
+    fontWeight: '500',
   },
   attendanceStatusDot: {
-    width: 11,
-    height: 11,
-    borderRadius: 5.5,
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
   },
-  // RED TIME INDICATOR STYLES
   currentTimeIndicatorLine: {
     position: 'absolute',
     height: 2,
     backgroundColor: '#EF4444',
-    zIndex: 99,
-    flexDirection: 'row',
-    alignItems: 'center',
+    zIndex: 10,
   },
   currentTimeDot: {
+    position: 'absolute',
+    left: -4,
+    top: -3,
     width: 8,
     height: 8,
     borderRadius: 4,
     backgroundColor: '#EF4444',
-    marginLeft: -4,
   },
 });

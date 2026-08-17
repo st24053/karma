@@ -107,7 +107,7 @@ export default function AttendanceScreen() {
 
     // 1. Find exact date match in calendar table
     let activeCalendarRecord = calendarData.find((c) => c.date === todayStr);
-
+    console.log(activeCalendarRecord)
     // 2. If current date is between school holidays/breaks, round up to next upcoming date
     if (!activeCalendarRecord) {
       activeCalendarRecord = calendarData.find((c) => c.date > todayStr);

@@ -25,7 +25,14 @@ type YearFilter = '2026' | '2025' | '2024' | 'All years';
 type LevelFilter = 'Level 3' | 'Level 2' | 'Level 1' | 'All levels';
 type TypeFilter = 'AS only' | 'AS and Mocks only' | 'All tests';
 
-type GradeStatus = 'Achieved with Excellence' | 'Achieved with Merit' | 'Achieved' | 'Not Achieved' | 'In moderation' | 'Standard not assessed yet' | 'Results entered, not published';
+type GradeStatus = 
+  | 'Achieved with Excellence' 
+  | 'Achieved with Merit' 
+  | 'Achieved' 
+  | 'Not Achieved' 
+  | 'In moderation' 
+  | 'Standard not assessed yet' 
+  | 'Results entered, not published';
 
 interface StandardRow {
   asNo: string;
@@ -43,14 +50,15 @@ interface StandardRow {
 }
 
 interface SubjectGroup {
+  classId: string;
   subjectName: string;
+  level: number;
+  year: number; 
   isUE: boolean;
   totalCreditsString: string;
   endorsement: string;
   highestPossibleEndorsement: string;
   gpa: string;
-  level: number;
-  year: number; 
   standards: StandardRow[];
 }
 
@@ -61,10 +69,48 @@ interface AntiClockwiseProgressRingProps {
   strokeWidth?: number;
 }
 
+interface JoinedGradeRecord {
+  id: string;
+  created_at: string;
+  nsn: string;
+  assessment_id: string;
+  grade: string | null;
+  status: string | null;
+  date_obtained: string | null;
+  assessment_type: string | null;
+  classes_standards: {
+    class_id: string;
+    assessment_type: string | null;
+    assessment_id: string;
+    as: number;
+    classes: {
+      id: string;
+      subject: string | null;
+      level: number | null;
+    } | null;
+    standards: {
+      as: number;
+      level: number | null;
+      nzqa_subject: string | null;
+      standard_name: string | null;
+      credits: number | null;
+      is_external: boolean | null;
+      is_ue_reading: boolean | null;
+      is_ue_writing: boolean | null;
+      is_ue_numeracy: boolean | null;
+    } | null;
+  } | null;
+}
+
 const mapDatabaseGradeToStatus = (grade: string | null, status: string | null): GradeStatus => {
-  if (!grade) return 'Standard not assessed yet';
-  if (!status) return 'Standard not assessed yet';
-  if (status.toLowerCase() !== 'results entered and published') return status === 'In moderation' ? 'In moderation' : status === 'Results entered, not published' ? 'Results entered, not published' : 'Standard not assessed yet';
+  if (!grade || !status) return 'Standard not assessed yet';
+  if (status.toLowerCase() !== 'results entered and published') {
+    return status === 'In moderation' 
+      ? 'In moderation' 
+      : status === 'Results entered, not published' 
+        ? 'Results entered, not published' 
+        : 'Standard not assessed yet';
+  }
   const cleanGrade = grade.trim().toUpperCase();
   switch (cleanGrade) {
     case 'E':
@@ -86,7 +132,7 @@ const mapDatabaseGradeToStatus = (grade: string | null, status: string | null): 
   }
 };
 
-function AntiClockwiseProgressRing({ percentage, strokeColor, size = 52, strokeWidth = 5 }: AntiClockwiseProgressRingProps) {
+function AntiClockwiseProgressRing({ percentage, strokeColor, size = 64, strokeWidth = 6 }: AntiClockwiseProgressRingProps) {
   const radius = (size - strokeWidth) / 2;
   const circumference = radius * 2 * Math.PI;
   const clampedPercentage = Math.min(Math.max(percentage, 0), 100);
@@ -128,9 +174,6 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // =========================================================
-  // SUPABASE DATA FETCH ENGINE
-  // =========================================================
   const fetchUserGrades = useCallback(async () => {
     try {
       setErrorMsg(null);
@@ -139,7 +182,6 @@ export default function HomeScreen() {
         throw new Error('No logged-in user email found in Context.');
       }
 
-      // 1. Lookup Student NSN using Email from Context
       const { data: studentInfo, error: studentError } = await supabase
         .from('student_personal_information')
         .select('nsn')
@@ -150,29 +192,76 @@ export default function HomeScreen() {
         throw new Error(`Could not find NSN record corresponding to "${userEmail}".`);
       }
 
-      // 2. Fetch Grades using NSN (including new UE columns)
-      const { data: rawGrades, error: gradesError } = await supabase
-        .from('grades')
-        .select('*')
-        .eq('nsn', studentInfo.nsn)
-        .order('date_obtained', { ascending: false });
+      // Step 1: Fetch all class entries to establish clear subject + level definitions
+      const { data: classesData, error: classesError } = await supabase
+        .from('classes')
+        .select('id, subject, level');
 
+      if (classesError) {
+        throw new Error(classesError.message);
+      }
+
+      // Step 2: Fetch student standard records with joins
+      const { data: rawGradesData, error: gradesError } = await supabase
+        .from('grades')
+        .select(`
+          id,
+          created_at,
+          nsn,
+          assessment_id,
+          grade,
+          status,
+          date_obtained,
+          assessment_type,
+          classes_standards (
+            assessment_id,
+            as,
+            class_id,
+            classes (
+              id,
+              subject,
+              level
+            ),
+            standards (
+              as,
+              level,
+              nzqa_subject,
+              standard_name,
+              credits,
+              is_external,
+              is_ue_reading,
+              is_ue_writing,
+              is_ue_numeracy
+            )
+          )
+        `)
+        .order('date_obtained', { ascending: false });
+      
       if (gradesError) {
         throw new Error(gradesError.message);
       }
 
-      if (!rawGrades || rawGrades.length === 0) {
-        setSubjectGroups([]);
-        return;
-      }
+      const rawGrades = (rawGradesData as unknown) as JoinedGradeRecord[];
+      
+      // Build class map directly from classes table schema
+      const classMap: Record<string, { subjectName: string; level: number; standards: StandardRow[] }> = {};
 
-      // 3. Grouping & Transforming database records
-      const subjectMap: Record<string, StandardRow[]> = {};
+      (classesData || []).forEach(cls => {
+        const classId = cls.id.toString();
+        classMap[classId] = {
+          subjectName: cls.subject || 'Uncategorized',
+          level: Number(cls.level) || 3,
+          standards: []
+        };
+      });
 
+      // Step 3: Assign standards to their parent class using class_id
       rawGrades.forEach((item) => {
-        const subjectKey = item.subject || 'Uncategorized';
-        
-        // Derive year directly from date_obtained
+        const cs = item.classes_standards;
+        const cls = cs?.classes;
+        const std = cs?.standards;
+        const targetClassId = cs?.class_id?.toString() || cls?.id?.toString() || 'unknown';
+
         let dbYear = 2026;
         if (item.date_obtained) {
           const parsedDate = new Date(item.date_obtained);
@@ -181,140 +270,177 @@ export default function HomeScreen() {
           }
         }
 
-        // Derive level from standard code if available, default to 3
-        let dbLevel = 3;
-        if (item.level && !isNaN(Number(item.level))) {
-          dbLevel = Number(item.level);
-        } else if (item.as && item.as.length >= 2) {
-          const prefix = item.as.substring(0, 2);
-          if (prefix === '91') dbLevel = 3;
-          else if (prefix === '90') dbLevel = 2;
-          else if (prefix === '88') dbLevel = 1;
+        // Determine standard-level properties strictly from standard definition
+        let standardLevel = 3;
+        if (std?.level !== null && std?.level !== undefined && !isNaN(Number(std.level))) {
+          standardLevel = Number(std.level);
+        } else if (cs?.as) {
+          const asStr = cs.as.toString();
+          if (asStr.startsWith('91')) standardLevel = 3;
+          else if (asStr.startsWith('90')) standardLevel = 2;
+          else if (asStr.startsWith('88')) standardLevel = 1;
         }
 
-        const standardType = (item.type || '').toLowerCase().includes('external') ? 'External' : 'Internal';
+        const standardType = std?.is_external ? 'External' : 'Internal';
 
         const row: StandardRow = {
-          asNo: item.as || 'Standard not assessed yet',
-          asName: item.standard_name || 'Unnamed Standard',
-          credits: Number(item.credits) || 3,
+          asNo: cs?.as ? cs.as.toString() : 'Standard not assessed yet',
+          asName: std?.standard_name || 'Unnamed Standard',
+          credits: Number(std?.credits) || 3,
           achievement: mapDatabaseGradeToStatus(item.grade, item.status),
-          status: item.status || 'Standard not assessed yet',
+          status: (item.status as StandardRow['status']) || 'Standard not assessed yet',
           type: standardType,
-          assessment_type: item.assessment_type || 'EOTT',
+          assessment_type: (item.assessment_type as StandardRow['assessment_type']) || cs?.assessment_type || 'EOTT',
           year: dbYear,
-          level: dbLevel,
-          ueReading: Boolean(item.ue_reading),
-          ueWriting: Boolean(item.ue_writing),
-          ueNumeracy: Boolean(item.ue_numeracy),
+          level: standardLevel,
+          ueReading: Boolean(std?.is_ue_reading),
+          ueWriting: Boolean(std?.is_ue_writing),
+          ueNumeracy: Boolean(std?.is_ue_numeracy),
         };
 
-        if (!subjectMap[subjectKey]) {
-          subjectMap[subjectKey] = [];
+        if (!classMap[targetClassId]) {
+          classMap[targetClassId] = {
+            subjectName: cls?.subject || 'Uncategorized',
+            level: Number(cls?.level) || standardLevel,
+            standards: []
+          };
         }
-        subjectMap[subjectKey].push(row);
+
+        classMap[targetClassId].standards.push(row);
       });
 
-      // 4. Construct final SubjectGroup objects
-      const transformedGroups: SubjectGroup[] = Object.keys(subjectMap).map((subjectName) => {
-        const standards = subjectMap[subjectName];
-        const year = standards[0]?.year || 2026;
-        const level = standards[0]?.level || 3;
+      // Step 4: Map aggregated results back into SubjectGroup structure
+      const transformedGroups: SubjectGroup[] = Object.keys(classMap)
+        .filter(classId => classMap[classId].standards.length > 0)
+        .map((classId) => {
+          const classInfo = classMap[classId];
+          const standards = classInfo.standards;
+          const year = standards[0]?.year || 2026;
+          const classLevel = classInfo.level;
+          const baseSubjectName = classInfo.subjectName;
 
-        let internalNotAchievedCredits = 0;
-        let externalNotAchievedCredits = 0;
-        let achievedCredits = 0;
-        let internalAchievedCredits = 0;
-        let externalAchievedCredits = 0;
-        let internalMeritCredits = 0;
-        let externalMeritCredits = 0;
-        let internalExcellenceCredits = 0;
-        let externalExcellenceCredits = 0;
-        let Endorsement = 'None';
-        let highestPossibleEndorsement = 'None';
-        let totalEnrolledInternalCredits = 0;
-        let totalEnrolledExternalCredits = 0;
-        let totalEnrolledCredits = 0;
-        let totalPoints = 0;
+          let internalNotAchievedCredits = 0;
+          let externalNotAchievedCredits = 0;
+          let achievedCredits = 0;
+          let internalAchievedCredits = 0;
+          let externalAchievedCredits = 0;
+          let internalMeritCredits = 0;
+          let externalMeritCredits = 0;
+          let internalExcellenceCredits = 0;
+          let externalExcellenceCredits = 0;
+          let Endorsement = 'None';
+          let highestPossibleEndorsement = 'None';
+          let totalEnrolledInternalCredits = 0;
+          let totalEnrolledExternalCredits = 0;
+          let totalEnrolledCredits = 0;
+          let totalPoints = 0;
 
-        standards.forEach((std) => {
-          totalEnrolledCredits += std.credits;
-          if (std.type === 'Internal') {
-            totalEnrolledInternalCredits += std.credits;
-          } else if (std.type === 'External') {
-            totalEnrolledExternalCredits += std.credits;
-          }
-          if (std.achievement !== 'Standard not assessed yet' && std.achievement !== 'Results entered, not published' && std.achievement !== 'In moderation' && std.achievement !== 'Not Achieved' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US')) {
-            achievedCredits += std.credits;
-            let multiplier = 2;
-
-            if (std.type === 'Internal' && std.achievement === 'Achieved') {
-              internalAchievedCredits += std.credits;
-            } else if (std.type === 'External' && std.achievement === 'Achieved') {
-              externalAchievedCredits += std.credits;
+          standards.forEach((std) => {
+            if (std.assessment_type === "Official AS" || std.assessment_type === "Official US") {
+              totalEnrolledCredits += std.credits;
+              if (std.type === 'Internal') {
+                totalEnrolledInternalCredits += std.credits;
+              } else if (std.type === 'External') {
+                totalEnrolledExternalCredits += std.credits;
+              }
             }
+            
+            if (
+              std.achievement !== 'Standard not assessed yet' && 
+              std.achievement !== 'Results entered, not published' && 
+              std.achievement !== 'In moderation' && 
+              std.achievement !== 'Not Achieved' && 
+              (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US')
+            ) {
+              achievedCredits += std.credits;
+              let multiplier = 2;
 
-            if (std.achievement === 'Achieved with Merit') multiplier = 3;
+              if (std.type === 'Internal' && std.achievement === 'Achieved') {
+                internalAchievedCredits += std.credits;
+              } else if (std.type === 'External' && std.achievement === 'Achieved') {
+                externalAchievedCredits += std.credits;
+              }
 
-            if (std.type === 'Internal' && std.achievement === 'Achieved with Merit') {
-              internalMeritCredits += std.credits;
-            } else if (std.type === 'External' && std.achievement === 'Achieved with Merit') {
-              externalMeritCredits += std.credits;
+              if (std.achievement === 'Achieved with Merit') multiplier = 3;
+
+              if (std.type === 'Internal' && std.achievement === 'Achieved with Merit') {
+                internalMeritCredits += std.credits;
+              } else if (std.type === 'External' && std.achievement === 'Achieved with Merit') {
+                externalMeritCredits += std.credits;
+              }
+
+              if (std.achievement === 'Achieved with Excellence') multiplier = 4;
+
+              if (std.type === 'Internal' && std.achievement === 'Achieved with Excellence') {
+                internalExcellenceCredits += std.credits;
+              } else if (std.type === 'External' && std.achievement === 'Achieved with Excellence') {
+                externalExcellenceCredits += std.credits;
+              }
+
+              totalPoints += std.credits * multiplier;
+            } else if (std.achievement === 'Not Achieved' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US')) {
+              if (std.type === 'Internal') {
+                internalNotAchievedCredits += std.credits;
+              } else if (std.type === 'External') {
+                externalNotAchievedCredits += std.credits;
+              }
             }
+          });
 
-            if (std.achievement === 'Achieved with Excellence') multiplier = 4;
-
-            if (std.type === 'Internal' && std.achievement === 'Achieved with Excellence') {
-              internalExcellenceCredits += std.credits;
-            } else if (std.type === 'External' && std.achievement === 'Achieved with Excellence') {
-              externalExcellenceCredits += std.credits;
-            }
-
-            totalPoints += std.credits * multiplier;
-          } else if (std.achievement === 'Not Achieved' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US')) {
-            if (std.type === 'Internal') {
-              internalNotAchievedCredits += std.credits;
-            } else if (std.type === 'External') {
-              externalNotAchievedCredits += std.credits;
-            }
-          }
-          
-          // Endorsement Logic
           if (internalExcellenceCredits >= 3 && externalExcellenceCredits >= 3 && (internalExcellenceCredits + externalExcellenceCredits) >= 14) {
-            Endorsement = 'E';
-          } else if ((internalMeritCredits + internalExcellenceCredits) >= 3 && (externalMeritCredits + externalExcellenceCredits) >= 3 && (internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits) >= 14) {
-            Endorsement = 'M';
-          } else if ((internalAchievedCredits + internalMeritCredits + internalExcellenceCredits) >= 3 && (externalAchievedCredits + externalMeritCredits + externalExcellenceCredits) >= 3 && (internalAchievedCredits + externalAchievedCredits + internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits) >= 14) {
-            Endorsement = 'A';
+            Endorsement = 'Excellence';
+          } else if (
+            (internalMeritCredits + internalExcellenceCredits) >= 3 && 
+            (externalMeritCredits + externalExcellenceCredits) >= 3 && 
+            (internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits) >= 14
+          ) {
+            Endorsement = 'Merit';
+          } else if (
+            (internalAchievedCredits + internalMeritCredits + internalExcellenceCredits) >= 3 && 
+            (externalAchievedCredits + externalMeritCredits + externalExcellenceCredits) >= 3 && 
+            (internalAchievedCredits + externalAchievedCredits + internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits) >= 14
+          ) {
+            Endorsement = 'Achieved';
           }
 
-          // Highest possible endorsement logic
-          let possibleAdditionalInternalExcellenceCredits = totalEnrolledInternalCredits - (internalExcellenceCredits + internalMeritCredits + internalAchievedCredits + internalNotAchievedCredits);
-          let possibleAdditionalExternalExcellenceCredits = totalEnrolledExternalCredits - (externalExcellenceCredits + externalMeritCredits + externalAchievedCredits + externalNotAchievedCredits);
+          const possibleAdditionalInternalExcellenceCredits = totalEnrolledInternalCredits - (internalExcellenceCredits + internalMeritCredits + internalAchievedCredits + internalNotAchievedCredits);
+          const possibleAdditionalExternalExcellenceCredits = totalEnrolledExternalCredits - (externalExcellenceCredits + externalMeritCredits + externalAchievedCredits + externalNotAchievedCredits);
 
-          if (internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits >= 3 && externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits >= 3 && (internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14) {
-            highestPossibleEndorsement = 'E';
-          } else if ((internalMeritCredits + internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits) >= 3 && (externalMeritCredits + externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 3 && (internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14) {
-            highestPossibleEndorsement = 'M';
-          } else if ((internalAchievedCredits + internalMeritCredits + internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits) >= 3 && (externalAchievedCredits + externalMeritCredits + externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 3 && (internalAchievedCredits + externalAchievedCredits + internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14) {
-            highestPossibleEndorsement = 'A';
+          if (
+            internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits >= 3 && 
+            externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits >= 3 && 
+            (internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14
+          ) {
+            highestPossibleEndorsement = 'Excellence';
+          } else if (
+            (internalMeritCredits + internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits) >= 3 && 
+            (externalMeritCredits + externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 3 && 
+            (internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14
+          ) {
+            highestPossibleEndorsement = 'Merit';
+          } else if (
+            (internalAchievedCredits + internalMeritCredits + internalExcellenceCredits + possibleAdditionalInternalExcellenceCredits) >= 3 && 
+            (externalAchievedCredits + externalMeritCredits + externalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 3 && 
+            (internalAchievedCredits + externalAchievedCredits + internalMeritCredits + externalMeritCredits + internalExcellenceCredits + externalExcellenceCredits + possibleAdditionalInternalExcellenceCredits + possibleAdditionalExternalExcellenceCredits) >= 14
+          ) {
+            highestPossibleEndorsement = 'Achieved';
           }
+
+          const gpaVal = totalEnrolledCredits > 0 ? (totalPoints / (achievedCredits || 1)).toFixed(2) : '0.00';
+
+          return {
+            classId,
+            subjectName: baseSubjectName,
+            level: classLevel,
+            isUE: true,
+            endorsement: Endorsement,
+            highestPossibleEndorsement: highestPossibleEndorsement,
+            totalCreditsString: `${achievedCredits}/${totalEnrolledCredits}`,
+            gpa: gpaVal,
+            year,
+            standards,
+          };
         });
-
-        const gpaVal = totalEnrolledCredits > 0 ? (totalPoints / achievedCredits).toFixed(2) : '0.00';
-
-        return {
-          subjectName,
-          isUE: true,
-          endorsement: Endorsement,
-          highestPossibleEndorsement: highestPossibleEndorsement,
-          totalCreditsString: `${achievedCredits}/${totalEnrolledCredits}`,
-          gpa: gpaVal,
-          level,
-          year,
-          standards,
-        };
-      });
 
       setSubjectGroups(transformedGroups);
     } catch (err: any) {
@@ -349,7 +475,8 @@ export default function HomeScreen() {
         const isValidAchievement =
           std.achievement !== 'Not Achieved' &&
           std.achievement !== 'Standard not assessed yet' &&
-          std.achievement !== 'Results entered, not published';
+          std.achievement !== 'Results entered, not published' &&
+          std.achievement !== 'In moderation';
 
         if (std.level === 3 && isValidAchievement) {
           l3AchievedCreditsForGroup += std.credits || 0;
@@ -357,8 +484,8 @@ export default function HomeScreen() {
       });
 
       if (l3AchievedCreditsForGroup > 0) {
-        subjectMap[group.subjectName] =
-          (subjectMap[group.subjectName] || 0) + l3AchievedCreditsForGroup;
+        const fullSubjectName = `${group.subjectName} ${group.level}`;
+        subjectMap[fullSubjectName] = (subjectMap[fullSubjectName] || 0) + l3AchievedCreditsForGroup;
       }
     });
 
@@ -378,7 +505,6 @@ export default function HomeScreen() {
   const topSubject2 = top3Level3Subjects[1];
   const topSubject3 = top3Level3Subjects[2];
 
-  // Global Cumulative Metrics Calculation
   const globalCumulativeMetrics = useMemo(() => {
     let level1Achieved = 0;
     let level1Excellence = 0;
@@ -396,7 +522,6 @@ export default function HomeScreen() {
     let globalMerit = 0;
     let globalAchieved = 0;
 
-    // UE Literacy & Numeracy counters
     let ueReadingCredits = 0;
     let ueWritingCredits = 0;
     let ueNumeracyCredits = 0;
@@ -407,14 +532,14 @@ export default function HomeScreen() {
 
     subjectGroups.forEach(subject => {
       let subjectL3Credits = 0;
+      const fullSubjectName = `${subject.subjectName} ${subject.level}`;
 
       subject.standards.forEach(std => {
         const isExcellence = std.achievement === 'Achieved with Excellence' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US');
         const isMerit = std.achievement === 'Achieved with Merit' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US');
         const isAchieved = std.achievement === 'Achieved' && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US');
-        const isPassed = isExcellence || isMerit || isAchieved && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US');
+        const isPassed = (isExcellence || isMerit || isAchieved) && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US');
 
-        // Cumulative UE Literacy & Numeracy Credits
         if (isPassed && (std.assessment_type === 'Official AS' || std.assessment_type === 'Official US')) {
           if (std.ueReading) ueReadingCredits += std.credits;
           if (std.ueWriting) ueWritingCredits += std.credits;
@@ -442,10 +567,10 @@ export default function HomeScreen() {
             Level3Achieved += std.credits;
             subjectL3Credits += std.credits;
 
-            if (!subjectLevel3CreditsMap[subject.subjectName]) {
-              subjectLevel3CreditsMap[subject.subjectName] = [];
+            if (!subjectLevel3CreditsMap[fullSubjectName]) {
+              subjectLevel3CreditsMap[fullSubjectName] = [];
             }
-            subjectLevel3CreditsMap[subject.subjectName].push({
+            subjectLevel3CreditsMap[fullSubjectName].push({
               grade: std.achievement,
               credits: std.credits,
               assessment_type: std.assessment_type,
@@ -464,24 +589,21 @@ export default function HomeScreen() {
 
     const totalGlobalAchievedPool = globalExcellence + globalMerit + globalAchieved;
 
-    // Rank Score Calculation
-    let rankScorePool: { points: number; credits: number; assessment_type: string }[] = [];
+    const rankScorePool: { points: number; credits: number; assessment_type: string }[] = [];
 
     Object.values(subjectLevel3CreditsMap).forEach(subjectList => {
-    // 1. Filter out mocks/tests so only official assessments are counted
-    const officialSubjectList = subjectList.filter(
-      item => item.assessment_type === 'Official AS' || item.assessment_type === 'Official US'
-    );
+      const officialSubjectList = subjectList.filter(
+        item => item.assessment_type === 'Official AS' || item.assessment_type === 'Official US'
+      );
 
-    // 2. Sort official items by grade hierarchy
-    officialSubjectList.sort((a, b) => {
-      const order: Record<string, number> = {
-        'Achieved with Excellence': 3,
-        'Achieved with Merit': 2,
-        'Achieved': 1,
-      };
-      return (order[b.grade] || 0) - (order[a.grade] || 0);
-    });
+      officialSubjectList.sort((a, b) => {
+        const order: Record<string, number> = {
+          'Achieved with Excellence': 3,
+          'Achieved with Merit': 2,
+          'Achieved': 1,
+        };
+        return (order[b.grade] || 0) - (order[a.grade] || 0);
+      });
 
       let subjectCountedCredits = 0;
       officialSubjectList.forEach(item => {
@@ -508,7 +630,6 @@ export default function HomeScreen() {
       accumulatedRankCredits += creditsToTake;
     }
 
-    // UE Status Checks
     const isUeReadingAchieved = ueReadingCredits >= 5;
     const isUeWritingAchieved = ueWritingCredits >= 5;
     const isUeLiteracyAchieved = isUeReadingAchieved && isUeWritingAchieved && (ueReadingCredits + ueWritingCredits >= 10);
@@ -551,68 +672,59 @@ export default function HomeScreen() {
     };
   }, [subjectGroups, topSubject1, topSubject2, topSubject3]);
 
-  // Dynamic Selected Values for Cards
-const selectedEndorsementCredits = useMemo(() => {
-  const {
-    level1Achieved,
-    level1Merit,
-    level1Excellence,
-    level2Achieved,
-    level2Merit,
-    level2Excellence,
-    Level3Achieved,
-    level3Merit,
-    Level3Excellence,
-  } = globalCumulativeMetrics;
+  const selectedEndorsementCredits = useMemo(() => {
+    const {
+      level1Achieved,
+      level1Merit,
+      level1Excellence,
+      level2Achieved,
+      level2Merit,
+      level2Excellence,
+      Level3Achieved,
+      level3Merit,
+      Level3Excellence,
+    } = globalCumulativeMetrics;
 
-  // Derive pure Merit credits per level (since levelXMerit includes Excellence)
-  const pureL3Merit = Math.max(0, level3Merit - Level3Excellence);
-  const pureL2Merit = Math.max(0, level2Merit - level2Excellence);
-  const pureL1Merit = Math.max(0, level1Merit - level1Excellence);
+    const pureL3Merit = Math.max(0, level3Merit - Level3Excellence);
+    const pureL2Merit = Math.max(0, level2Merit - level2Excellence);
+    const pureL1Merit = Math.max(0, level1Merit - level1Excellence);
 
-  // --- LEVEL 3 ---
-  if (endorsementLevel === 3) {
-    if (endorsementType === 'Achieved') return Level3Achieved;
-    if (endorsementType === 'Excellence') return Level3Excellence;
-    // Level 3 Merit+ = level3Merit (which already combines L3 Merit + L3 Excellence)
-    return level3Merit;
-  }
-
-  // --- LEVEL 2 ---
-  if (endorsementLevel === 2) {
-    if (endorsementType === 'Achieved') {
-      return level2Achieved + Level3Achieved;
+    if (endorsementLevel === 3) {
+      if (endorsementType === 'Achieved') return Level3Achieved;
+      if (endorsementType === 'Excellence') return Level3Excellence;
+      return level3Merit;
     }
-    if (endorsementType === 'Excellence') {
-      return level2Excellence + Level3Excellence;
-    }
-    // Level 2 Merit+ = Pure L2 Merit + Pure L3 Merit + L2 Excellence + L3 Excellence
-    return pureL2Merit + pureL3Merit + level2Excellence + Level3Excellence;
-  }
 
-  // --- LEVEL 1 ---
-  if (endorsementLevel === 1) {
-    if (endorsementType === 'Achieved') {
-      return level1Achieved + level2Achieved + Level3Achieved;
+    if (endorsementLevel === 2) {
+      if (endorsementType === 'Achieved') {
+        return level2Achieved + Level3Achieved;
+      }
+      if (endorsementType === 'Excellence') {
+        return level2Excellence + Level3Excellence;
+      }
+      return pureL2Merit + pureL3Merit + level2Excellence + Level3Excellence;
     }
-    if (endorsementType === 'Excellence') {
-      return level1Excellence + level2Excellence + Level3Excellence;
+
+    if (endorsementLevel === 1) {
+      if (endorsementType === 'Achieved') {
+        return level1Achieved + level2Achieved + Level3Achieved;
+      }
+      if (endorsementType === 'Excellence') {
+        return level1Excellence + level2Excellence + Level3Excellence;
+      }
+      return (
+        pureL1Merit +
+        pureL2Merit +
+        pureL3Merit +
+        level1Excellence +
+        level2Excellence +
+        Level3Excellence
+      );
     }
-    // Level 1 Merit+ = Pure Merit across L1/L2/L3 + Excellence across L1/L2/L3
-    return (
-      pureL1Merit +
-      pureL2Merit +
-      pureL3Merit +
-      level1Excellence +
-      level2Excellence +
-      Level3Excellence
-    );
-  }
 
-  return 0;
-}, [endorsementLevel, endorsementType, globalCumulativeMetrics]);
+    return 0;
+  }, [endorsementLevel, endorsementType, globalCumulativeMetrics]);
 
-  // Filtered Engine
   const filteredDatabase = useMemo(() => {
     return subjectGroups.map(subject => {
       const validStandards = subject.standards.filter(std => {
@@ -625,7 +737,7 @@ const selectedEndorsementCredits = useMemo(() => {
           matchType =
             std.assessment_type === 'Official AS' || std.assessment_type === 'Official US' || std.assessment_type === 'UEG';
         } else if (selectedType === 'All tests') {
-          matchType = true; // includes 'Official AS', 'Official US', 'UEG', and 'EOTT'
+          matchType = true;
         }
         
         return matchYear && matchLevel && matchType;
@@ -637,7 +749,6 @@ const selectedEndorsementCredits = useMemo(() => {
     }).filter((s): s is SubjectGroup => s !== null);
   }, [subjectGroups, selectedYear, selectedLevel, selectedType]);
 
-  // Filter-dependent GPA Calculation
   const filteredGpa = useMemo(() => {
     let totalGradedCredits = 0;
     let totalGpaPoints = 0;
@@ -695,9 +806,9 @@ const selectedEndorsementCredits = useMemo(() => {
 
   const pieChartComponent = useMemo(() => {
     const total = currentFilteredBreakdownMetrics.totalWithOutcomes;
-    const size = 140;
+    const size = 180;
     const center = size / 2;
-    const r = size / 2 - 10;
+    const r = size / 2 - 12;
 
     if (total === 0) {
       return (
@@ -743,7 +854,7 @@ const selectedEndorsementCredits = useMemo(() => {
     return (
       <ThemedView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color="#2563EB" />
-        <ThemedText style={{ marginTop: Spacing.three, color: currentColors.textSecondary }}>Loading Grades...</ThemedText>
+        <ThemedText style={{ marginTop: Spacing.four, fontSize: 18, color: currentColors.textSecondary }}>Loading Grades...</ThemedText>
       </ThemedView>
     );
   }
@@ -752,9 +863,8 @@ const selectedEndorsementCredits = useMemo(() => {
   const gpaValueNum = Number(filteredGpa);
   const gpaPercentage = Math.min(Math.round((gpaValueNum / 4.0) * 100), 100);
   const targetCredits = currentFilteredBreakdownMetrics.totalWithOutcomes + currentFilteredBreakdownMetrics.resultsPendingNA;
-  const totalCreditsPercentage = Math.min(Math.round(((currentFilteredBreakdownMetrics.totalWithOutcomes - currentFilteredBreakdownMetrics.notAchieved) / targetCredits) * 100), 100);
+  const totalCreditsPercentage = Math.min(Math.round(((currentFilteredBreakdownMetrics.totalWithOutcomes - currentFilteredBreakdownMetrics.notAchieved) / (targetCredits || 1)) * 100), 100);
   
-  // Percentages for UE Literacy and Numeracy cards (out of 5 credits each for literacy reading/writing, 10 for numeracy)
   const ueReadingPercentage = Math.min(Math.round((globalCumulativeMetrics.ueReadingCredits / 5) * 100), 100);
   const ueWritingPercentage = Math.min(Math.round((globalCumulativeMetrics.ueWritingCredits / 5) * 100), 100);
   const ueNumeracyPercentage = Math.min(Math.round((globalCumulativeMetrics.ueNumeracyCredits / 10) * 100), 100);
@@ -786,7 +896,7 @@ const selectedEndorsementCredits = useMemo(() => {
           {/* Global Progress Cards Grid */}
           <View style={styles.statsMetricsWrapper}>
 
-            {/* Card 1 (Full Width): UE Requirements - All 5 Level 3 Subjects */}
+            {/* Card 1 (Full Width): UE Requirements - All Level 3 Subjects */}
             <View style={[styles.metricItemCardFullWidth, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
               <View style={styles.cardHeaderRow}>
                 <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>
@@ -805,23 +915,23 @@ const selectedEndorsementCredits = useMemo(() => {
                         std.achievement !== 'Not Achieved' &&
                         std.achievement !== 'Standard not assessed yet' &&
                         std.achievement !== 'Results entered, not published' &&
-                        std.achievement !== 'In moderation'
-                        ;
+                        std.achievement !== 'In moderation';
+                      
                       if (std.level === 3 && isValidAchievement) {
                         l3Credits += std.credits || 0;
                       }
                     });
                   }
 
-                  const subjectName = subjectGroup?.subjectName || `Subject ${index + 1}`;
+                  const subjectName = subjectGroup ? `${subjectGroup.subjectName} ${subjectGroup.level}` : `Subject ${index + 1}`;
                   const ringPercentage = Math.min(100, Math.round((l3Credits / 14) * 100));
 
                   return (
                     <View key={`ue-subj-${index}`} style={styles.ueSubjectRingItem}>
-                      <AntiClockwiseProgressRing percentage={ringPercentage} strokeColor="#EA580C" />
+                      <AntiClockwiseProgressRing percentage={ringPercentage} strokeColor="#EA580C" size={58} strokeWidth={5} />
                       <ThemedText style={[styles.ueSubjectCreditsText, { color: '#EA580C' }]}>
                         {l3Credits}
-                        <ThemedText style={{ fontSize: 10, fontWeight: '400' }}>/14</ThemedText>
+                        <ThemedText style={{ fontSize: 13, fontWeight: '500' }}>/14</ThemedText>
                       </ThemedText>
                       <ThemedText numberOfLines={1} style={[styles.ueSubjectNameText, { color: currentColors.text }]}>
                         {subjectName}
@@ -832,8 +942,40 @@ const selectedEndorsementCredits = useMemo(() => {
               </View>
             </View>
 
-            {/* Card 2: Endorsement & Achievement Progress */}
-            <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
+            {/* Card 2 (Full Width): Combined UE Literacy & UE Numeracy */}
+            <View style={[styles.metricItemCardFullWidth, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
+              <View style={styles.cardHeaderRow}>
+                <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>
+                  UE Literacy & Numeracy Requirements
+                </ThemedText>
+              </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginTop: 6 }}>
+                <View style={{ alignItems: 'center' }}>
+                  <AntiClockwiseProgressRing percentage={ueReadingPercentage} strokeColor="#EC4899" size={58} strokeWidth={5} />
+                  <ThemedText style={{ fontSize: 16, fontWeight: '800', color: '#EC4899', marginTop: 4 }}>
+                    {globalCumulativeMetrics.ueReadingCredits}<ThemedText style={{ fontSize: 13, fontWeight: '500' }}>/5</ThemedText>
+                  </ThemedText>
+                  <ThemedText style={[styles.descriptionMetaText, { color: currentColors.text }]}>UE Reading</ThemedText>
+                </View>
+                <View style={{ alignItems: 'center' }}>
+                  <AntiClockwiseProgressRing percentage={ueWritingPercentage} strokeColor="#D946EF" size={58} strokeWidth={5} />
+                  <ThemedText style={{ fontSize: 16, fontWeight: '800', color: '#D946EF', marginTop: 4 }}>
+                    {globalCumulativeMetrics.ueWritingCredits}<ThemedText style={{ fontSize: 13, fontWeight: '500' }}>/5</ThemedText>
+                  </ThemedText>
+                  <ThemedText style={[styles.descriptionMetaText, { color: currentColors.text }]}>UE Writing</ThemedText>
+                </View>
+                <View style={{ alignItems: 'center' }}>
+                  <AntiClockwiseProgressRing percentage={ueNumeracyPercentage} strokeColor="#14B8A6" size={58} strokeWidth={5} />
+                  <ThemedText style={{ fontSize: 16, fontWeight: '800', color: '#14B8A6', marginTop: 4 }}>
+                    {globalCumulativeMetrics.ueNumeracyCredits}<ThemedText style={{ fontSize: 13, fontWeight: '500' }}>/10</ThemedText>
+                  </ThemedText>
+                  <ThemedText style={[styles.descriptionMetaText, { color: currentColors.text }]}>UE Numeracy</ThemedText>
+                </View>
+              </View>
+            </View>
+
+            {/* Card 3 (Full Width): Endorsement & Achievement Progress */}
+            <View style={[styles.metricItemCardFullWidth, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
               <View style={styles.floatingControlsContainer}>
                 <View style={styles.selectorPillGroup}>
                   {(['Excellence', 'Merit', 'Achieved'] as const).map((type) => {
@@ -841,16 +983,16 @@ const selectedEndorsementCredits = useMemo(() => {
                     return (
                       <TouchableOpacity
                         key={`end-type-${type}`}
-                        onPress={() => setEndorsementType(type as any)}
+                        onPress={() => setEndorsementType(type)}
                         style={[
                           styles.selectorPill,
-                          endorsementType === (type as any) && { backgroundColor: pillColor },
+                          endorsementType === type && { backgroundColor: pillColor },
                         ]}
                       >
                         <ThemedText
                           style={[
                             styles.selectorPillText,
-                            endorsementType === (type as any) && { color: '#FFFFFF', fontWeight: '700' },
+                            endorsementType === type && { color: '#FFFFFF', fontWeight: '700' },
                           ]}
                         >
                           {type[0]}
@@ -898,6 +1040,8 @@ const selectedEndorsementCredits = useMemo(() => {
                     Math.round((selectedEndorsementCredits / (endorsementType === 'Achieved' ? 60 : 50)) * 100)
                   )}
                   strokeColor={getEndorsementColor(endorsementType)}
+                  size={64}
+                  strokeWidth={6}
                 />
                 <View style={styles.metricTextRightBlock}>
                   <ThemedText
@@ -918,49 +1062,11 @@ const selectedEndorsementCredits = useMemo(() => {
               </View>
             </View>
 
-            {/* Card 3: UE Literacy (Reading & Writing out of 5 each) */}
-            <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
-              <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>UE Literacy Credits</ThemedText>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginTop: 4 }}>
-                <View style={{ alignItems: 'center' }}>
-                  <AntiClockwiseProgressRing percentage={ueReadingPercentage} strokeColor="#EC4899" size={44} strokeWidth={4} />
-                  <ThemedText style={{ fontSize: 13, fontWeight: '800', color: '#EC4899', marginTop: 2 }}>
-                    {globalCumulativeMetrics.ueReadingCredits}<ThemedText style={{ fontSize: 10, fontWeight: '400' }}>/5</ThemedText>
-                  </ThemedText>
-                  <ThemedText style={[styles.descriptionMetaText, { color: currentColors.text }]}>Reading</ThemedText>
-                </View>
-                <View style={{ alignItems: 'center' }}>
-                  <AntiClockwiseProgressRing percentage={ueWritingPercentage} strokeColor="#D946EF" size={44} strokeWidth={4} />
-                  <ThemedText style={{ fontSize: 13, fontWeight: '800', color: '#D946EF', marginTop: 2 }}>
-                    {globalCumulativeMetrics.ueWritingCredits}<ThemedText style={{ fontSize: 10, fontWeight: '400' }}>/5</ThemedText>
-                  </ThemedText>
-                  <ThemedText style={[styles.descriptionMetaText, { color: currentColors.text }]}>Writing</ThemedText>
-                </View>
-              </View>
-            </View>
-
-            {/* Card 4: UE Numeracy */}
-            <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
-              <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>UE Numeracy</ThemedText>
-              <View style={styles.centeredMetricRowContainer}>
-                <AntiClockwiseProgressRing percentage={ueNumeracyPercentage} strokeColor="#14B8A6" />
-                <View style={styles.metricTextRightBlock}>
-                  <ThemedText style={[styles.percentageHeadline, { color: '#14B8A6' }]}>
-                    {globalCumulativeMetrics.ueNumeracyCredits}
-                    <ThemedText style={styles.targetSubText}>/10</ThemedText>
-                  </ThemedText>
-                  <ThemedText numberOfLines={2} style={[styles.descriptionMetaText, { color: currentColors.text }]}>
-                    numeracy credits
-                  </ThemedText>
-                </View>
-              </View>
-            </View>
-
-            {/* Card 5: Rank Score */}
+            {/* Card 4: Rank Score */}
             <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
               <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>Rank Score</ThemedText>
               <View style={styles.centeredMetricRowContainer}>
-                <AntiClockwiseProgressRing percentage={rankScorePercentage} strokeColor="#8B5CF6" />
+                <AntiClockwiseProgressRing percentage={rankScorePercentage} strokeColor="#8B5CF6" size={64} strokeWidth={6} />
                 <View style={styles.metricTextRightBlock}>
                   <ThemedText style={[styles.percentageHeadline, { color: '#8B5CF6' }]}>
                     {globalCumulativeMetrics.rankScore}
@@ -973,11 +1079,11 @@ const selectedEndorsementCredits = useMemo(() => {
               </View>
             </View>
 
-            {/* Card 6: Filter-Dependent GPA */}
+            {/* Card 5: Filter-Dependent GPA */}
             <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
               <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>GPA (Filtered)</ThemedText>
               <View style={styles.centeredMetricRowContainer}>
-                <AntiClockwiseProgressRing percentage={gpaPercentage} strokeColor="#06B6D4" />
+                <AntiClockwiseProgressRing percentage={gpaPercentage} strokeColor="#06B6D4" size={64} strokeWidth={6} />
                 <View style={styles.metricTextRightBlock}>
                   <ThemedText style={[styles.percentageHeadline, { color: '#06B6D4' }]}>
                     {filteredGpa}
@@ -990,11 +1096,11 @@ const selectedEndorsementCredits = useMemo(() => {
               </View>
             </View>
 
-            {/* Card 7: Total Credits Achieved */}
+            {/* Card 6: Total Credits Achieved */}
             <View style={[styles.metricItemCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
               <ThemedText numberOfLines={1} style={styles.cardCornerFooterTag}>Total Enrolled Credits (Filtered)</ThemedText>
               <View style={styles.centeredMetricRowContainer}>
-                <AntiClockwiseProgressRing percentage={totalCreditsPercentage} strokeColor="#10B981" />
+                <AntiClockwiseProgressRing percentage={totalCreditsPercentage} strokeColor="#10B981" size={64} strokeWidth={6} />
                 <View style={styles.metricTextRightBlock}>
                   <ThemedText style={[styles.percentageHeadline, { color: '#10B981' }]}>
                     {currentFilteredBreakdownMetrics.totalWithOutcomes - currentFilteredBreakdownMetrics.notAchieved}
@@ -1016,7 +1122,7 @@ const selectedEndorsementCredits = useMemo(() => {
               onPress={() => setActiveDropdown(activeDropdown === 'year' ? null : 'year')}
             >
               <ThemedText style={[styles.filterValueText, { color: currentColors.text }]}>{selectedYear}</ThemedText>
-              <ChevronDown size={16} color={currentColors.textSecondary} />
+              <ChevronDown size={20} color={currentColors.textSecondary} />
             </TouchableOpacity>
 
             <TouchableOpacity 
@@ -1024,7 +1130,7 @@ const selectedEndorsementCredits = useMemo(() => {
               onPress={() => setActiveDropdown(activeDropdown === 'level' ? null : 'level')}
             >
               <ThemedText style={[styles.filterValueText, { color: currentColors.text }]}>{selectedLevel}</ThemedText>
-              <ChevronDown size={16} color={currentColors.textSecondary} />
+              <ChevronDown size={20} color={currentColors.textSecondary} />
             </TouchableOpacity>
 
             <TouchableOpacity 
@@ -1032,7 +1138,7 @@ const selectedEndorsementCredits = useMemo(() => {
               onPress={() => setActiveDropdown(activeDropdown === 'type' ? null : 'type')}
             >
               <ThemedText numberOfLines={1} style={[styles.filterValueText, { color: currentColors.text }]}>{selectedType}</ThemedText>
-              <ChevronDown size={16} color={currentColors.textSecondary} />
+              <ChevronDown size={20} color={currentColors.textSecondary} />
             </TouchableOpacity>
           </View>
 
@@ -1041,7 +1147,7 @@ const selectedEndorsementCredits = useMemo(() => {
             <View style={[styles.dropdownDrawer, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
               {(['2026', '2025', '2024', 'All years'] as YearFilter[]).map((y) => (
                 <TouchableOpacity key={y} style={styles.drawerOption} onPress={() => { setSelectedYear(y); setActiveDropdown(null); }}>
-                  <ThemedText style={{ fontWeight: selectedYear === y ? '700' : '400', color: currentColors.text }}>{y}</ThemedText>
+                  <ThemedText style={{ fontSize: 16, fontWeight: selectedYear === y ? '700' : '400', color: currentColors.text }}>{y}</ThemedText>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1051,7 +1157,7 @@ const selectedEndorsementCredits = useMemo(() => {
             <View style={[styles.dropdownDrawer, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
               {(['Level 3', 'Level 2', 'Level 1', 'All levels'] as LevelFilter[]).map((l) => (
                 <TouchableOpacity key={l} style={styles.drawerOption} onPress={() => { setSelectedLevel(l); setActiveDropdown(null); }}>
-                  <ThemedText style={{ fontWeight: selectedLevel === l ? '700' : '400', color: currentColors.text }}>{l}</ThemedText>
+                  <ThemedText style={{ fontSize: 16, fontWeight: selectedLevel === l ? '700' : '400', color: currentColors.text }}>{l}</ThemedText>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1061,7 +1167,7 @@ const selectedEndorsementCredits = useMemo(() => {
             <View style={[styles.dropdownDrawer, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
               {(['AS only', 'AS and Mocks only', 'All tests'] as TypeFilter[]).map((t) => (
                 <TouchableOpacity key={t} style={styles.drawerOption} onPress={() => { setSelectedType(t); setActiveDropdown(null); }}>
-                  <ThemedText style={{ fontWeight: selectedType === t ? '700' : '400', color: currentColors.text }}>{t}</ThemedText>
+                  <ThemedText style={{ fontSize: 16, fontWeight: selectedType === t ? '700' : '400', color: currentColors.text }}>{t}</ThemedText>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1071,85 +1177,90 @@ const selectedEndorsementCredits = useMemo(() => {
           <View style={styles.tablesContainerWrapper}>
             {filteredDatabase.length === 0 ? (
               <View style={styles.emptyStateContainer}>
-                <ThemedText style={{ color: currentColors.textSecondary, fontStyle: 'italic', textAlign: 'center' }}>
+                <ThemedText style={{ fontSize: 16, color: currentColors.textSecondary, fontStyle: 'italic', textAlign: 'center' }}>
                   No subject listings matched your current filter selection.
                 </ThemedText>
               </View>
             ) : (
-              filteredDatabase.map((subject, sIdx) => (
-                <View key={`${subject.subjectName}-${sIdx}`} style={styles.subjectBlockSegment}>
-                  <View style={[styles.subjectSectionHeader, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-                    <ThemedText style={[styles.subjectTitleText, { color: currentColors.text }]}>{subject.subjectName}</ThemedText>
-                    <View style={{ flexDirection: 'row', gap: Spacing.two }}>
-                      <ThemedText style={styles.subjectHeaderMetaBadge}>UE: ✅</ThemedText>
-                      <ThemedText style={styles.subjectHeaderMetaBadge}>Credits: {subject.totalCreditsString}</ThemedText>
-                      <ThemedText style={styles.subjectHeaderMetaBadge}>GPA: {subject.gpa}</ThemedText>
-                      <ThemedText style={styles.subjectHeaderMetaBadge}>Endorsement: {subject.endorsement}</ThemedText>
-                      <ThemedText style={styles.subjectHeaderMetaBadge}>Highest Possible Endorsement: {subject.highestPossibleEndorsement}</ThemedText>
-                    </View>
-                  </View>
-
-                  <View style={styles.tableMatrixGrid}>
-                    <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                      <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.headerLabelText}>AS No</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 2.8 }]}><ThemedText style={styles.headerLabelText}>AS Name</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 1.2 }]}><ThemedText style={styles.headerLabelText}>Type</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 1.2 }]}><ThemedText style={styles.headerLabelText}>Assessment</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 0.9 }]}><ThemedText style={styles.headerLabelText}>Year</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 0.9, alignItems: 'center' }]}><ThemedText style={styles.headerLabelText}>Credits</ThemedText></View>
-                      <View style={[styles.tableCell, { flex: 2.3 }]}><ThemedText style={styles.headerLabelText}>Achievement</ThemedText></View>
-                    </View>
-
-                    {subject.standards.map((row, idx) => (
-                      <View 
-                        key={`${row.asNo}-${row.level}-${idx}`}
-                        style={[
-                          styles.tableRecordRow, 
-                          { 
-                            borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9',
-                            backgroundColor: idx % 2 === 0 ? 'transparent' : (colorScheme === 'dark' ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)')
-                          }
-                        ]}
-                      >
-                        <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.rowInlineMainText}>{row.asNo}</ThemedText></View>
-                        <View style={[styles.tableCell, { flex: 2.8 }]}><ThemedText numberOfLines={2} style={styles.rowInlineMainText}>{row.asName}</ThemedText></View>
-                        <View style={[styles.tableCell, { flex: 1.2 }]}><ThemedText style={styles.rowInlineMainText}>{row.type}</ThemedText></View>
-                        <View style={[styles.tableCell, { flex: 1.2 }]}>
-                          <ThemedText 
-                            style={[
-                              styles.rowInlineMainText, 
-                              { 
-                                fontWeight: '600',
-                                color: row.assessment_type === 'Official AS' ? '#3B82F6' : row.assessment_type === 'Official US' ? '#D97706' : '#8B5CF6'
-                              }
-                            ]}
-                          >
-                            {row.assessment_type}
-                          </ThemedText>
-                        </View>
-                        <View style={[styles.tableCell, { flex: 0.9 }]}><ThemedText style={styles.rowInlineMainText}>{row.year}</ThemedText></View>
-                        <View style={[styles.tableCell, { flex: 0.9, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{row.credits}</ThemedText></View>
-                        <View style={[styles.tableCell, { flex: 2.3 }]}>
-                          <ThemedText 
-                            style={[
-                              styles.rowInlineMainText, 
-                              { 
-                                fontWeight: '700',
-                                color: row.achievement.includes('Excellence') ? '#10B981' : 
-                                       row.achievement.includes('Merit') ? '#3B82F6' : 
-                                       row.achievement === 'Achieved' ? '#D97706' : 
-                                       row.achievement === 'Not Achieved' ? '#EF4444' : '#64748B'
-                              }
-                            ]}
-                          >
-                            {row.achievement}
-                          </ThemedText>
-                        </View>
+              filteredDatabase.map((subject, sIdx) => {
+                const fullSubjectName = `${subject?.subjectName} ${subject?.level}`;
+                return (
+                  <View key={`${subject.classId}-${subject.subjectName}-${subject.level}-${sIdx}`} style={styles.subjectBlockSegment}>
+                    <View style={[styles.subjectSectionHeader, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9', flexDirection: 'column', gap: Spacing.two }]}>
+                      <ThemedText style={[styles.subjectTitleText, { color: currentColors.text }]}>{fullSubjectName}</ThemedText>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.three }}>
+                        <ThemedText style={styles.subjectHeaderMetaBadge}>UE: ✅</ThemedText>
+                        <ThemedText style={styles.subjectHeaderMetaBadge}>Credits: {subject.totalCreditsString}</ThemedText>
+                        <ThemedText style={styles.subjectHeaderMetaBadge}>GPA: {subject.gpa}</ThemedText>
+                        <ThemedText style={styles.subjectHeaderMetaBadge}>Endorsement: {subject.endorsement}</ThemedText>
+                        <ThemedText style={styles.subjectHeaderMetaBadge}>Highest Possible: {subject.highestPossibleEndorsement}</ThemedText>
                       </View>
-                    ))}
+                    </View>
+
+                    <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+                      <View style={styles.tableMatrixGrid}>
+                        <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                          <View style={[styles.tableCell, { width: 90 }]}><ThemedText style={styles.headerLabelText}>AS No</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.headerLabelText}>AS Name</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 100 }]}><ThemedText style={styles.headerLabelText}>Type</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 120 }]}><ThemedText style={styles.headerLabelText}>Assessment</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 80 }]}><ThemedText style={styles.headerLabelText}>Year</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 80, alignItems: 'center' }]}><ThemedText style={styles.headerLabelText}>Credits</ThemedText></View>
+                          <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.headerLabelText}>Achievement</ThemedText></View>
+                        </View>
+
+                        {subject.standards.map((row, idx) => (
+                          <View 
+                            key={`${row.asNo}-${row.level}-${idx}`}
+                            style={[
+                              styles.tableRecordRow, 
+                              { 
+                                borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9',
+                                backgroundColor: idx % 2 === 0 ? 'transparent' : (colorScheme === 'dark' ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)')
+                              }
+                            ]}
+                          >
+                            <View style={[styles.tableCell, { width: 90 }]}><ThemedText style={styles.rowInlineMainText}>{row.asNo}</ThemedText></View>
+                            <View style={[styles.tableCell, { width: 220 }]}><ThemedText numberOfLines={2} style={styles.rowInlineMainText}>{row.asName}</ThemedText></View>
+                            <View style={[styles.tableCell, { width: 100 }]}><ThemedText style={styles.rowInlineMainText}>{row.type}</ThemedText></View>
+                            <View style={[styles.tableCell, { width: 120 }]}>
+                              <ThemedText 
+                                style={[
+                                  styles.rowInlineMainText, 
+                                  { 
+                                    fontWeight: '600',
+                                    color: row.assessment_type === 'Official AS' ? '#3B82F6' : row.assessment_type === 'Official US' ? '#D97706' : '#8B5CF6'
+                                  }
+                                ]}
+                              >
+                                {row.assessment_type}
+                              </ThemedText>
+                            </View>
+                            <View style={[styles.tableCell, { width: 80 }]}><ThemedText style={styles.rowInlineMainText}>{row.year}</ThemedText></View>
+                            <View style={[styles.tableCell, { width: 80, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{row.credits}</ThemedText></View>
+                            <View style={[styles.tableCell, { width: 180 }]}>
+                              <ThemedText 
+                                style={[
+                                  styles.rowInlineMainText, 
+                                  { 
+                                    fontWeight: '700',
+                                    color: row.achievement.includes('Excellence') ? '#10B981' : 
+                                           row.achievement.includes('Merit') ? '#3B82F6' : 
+                                           row.achievement === 'Achieved' ? '#D97706' : 
+                                           row.achievement === 'Not Achieved' ? '#EF4444' : '#64748B'
+                                  }
+                                ]}
+                              >
+                                {row.achievement}
+                              </ThemedText>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    </ScrollView>
                   </View>
-                </View>
-              ))
+                );
+              })
             )}
           </View>
 
@@ -1160,7 +1271,7 @@ const selectedEndorsementCredits = useMemo(() => {
                 Achievement Breakdown
               </ThemedText>
               
-              <ThemedText style={{ fontSize: 13, color: currentColors.textSecondary, marginBottom: Spacing.three }}>
+              <ThemedText style={{ fontSize: 15, color: currentColors.textSecondary, marginBottom: Spacing.four }}>
                 Filtered Summary
               </ThemedText>
 
@@ -1174,111 +1285,107 @@ const selectedEndorsementCredits = useMemo(() => {
               ))}
             </View>
 
-            <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+            <View style={{ alignItems: 'center', justifyContent: 'center', paddingLeft: Spacing.two }}>
               {pieChartComponent}
             </View>
           </View>
-          {/* --- NCEA LEVEL & ENDORSEMENT STATUS TABLE --- */}
+
+          {/* NCEA LEVEL & ENDORSEMENT STATUS TABLE */}
           <View style={[styles.cardContainer, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#FFFFFF' }]}>
             <ThemedText style={styles.cardHeaderTitle}>NCEA Level & Endorsement Requirements</ThemedText>
             
-            {/* Literacy & Numeracy Expiring Rule Callout */}
             <View style={styles.warningBanner}>
               <ThemedText style={styles.warningBannerText}>
                 ⚠️ <ThemedText style={{ fontWeight: '700' }}>Note:</ThemedText> Literacy & Numeracy can be achieved via US 32403, 32405, 32406, or eligible standard credits. The standard credit pathway expires at the end of 2027.
               </ThemedText>
             </View>
 
-            {/* Table Header */}
-            <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-              <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.headerLabelText}>Level</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.headerLabelText}>Literacy</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.headerLabelText}>Numeracy</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.5 }]}><ThemedText style={styles.headerLabelText}>NCEA Level</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.8 }]}><ThemedText style={styles.headerLabelText}>Merit End.</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.8 }]}><ThemedText style={styles.headerLabelText}>Excellence End.</ThemedText></View>
-            </View>
-
-            {/* Rows for Level 1, Level 2, Level 3 */}
-            {[1, 2, 3].map((lvl) => {
-              const isLitMet = globalCumulativeMetrics.isUeLiteracyAchieved;
-              const isNumMet = globalCumulativeMetrics.isUeNumeracyAchieved;
-              const isLitNumMet = isLitMet && isNumMet;
-              
-              // NCEA Achieved Check (60 credits + Lit/Num)
-              const levelCredits = lvl === 1 ? globalCumulativeMetrics.level1Achieved + globalCumulativeMetrics.level2Achieved + globalCumulativeMetrics.Level3Achieved :
-                                  lvl === 2 ? globalCumulativeMetrics.level2Achieved + globalCumulativeMetrics.Level3Achieved :
-                                  globalCumulativeMetrics.Level3Achieved;
-                                  
-              const isLevelAchieved = levelCredits >= 60 && isLitNumMet;
-
-              // Pure Merit / Excellence totals
-              const pureL3E = globalCumulativeMetrics.Level3Excellence;
-              const pureL2E = globalCumulativeMetrics.level2Excellence;
-              const pureL1E = globalCumulativeMetrics.level1Excellence;
-
-              const pureL3M = Math.max(0, globalCumulativeMetrics.level3Merit - pureL3E);
-              const pureL2M = Math.max(0, globalCumulativeMetrics.level2Merit - pureL2E);
-              const pureL1M = Math.max(0, globalCumulativeMetrics.level1Merit - pureL1E);
-
-              const excellenceCredits = lvl === 3 ? pureL3E :
-                                          lvl === 2 ? pureL2E + pureL3E :
-                                          pureL1E + pureL2E + pureL3E;
-
-              const meritPlusCredits = lvl === 3 ? pureL3M + pureL3E :
-                                        lvl === 2 ? pureL2M + pureL2E + pureL3M + pureL3E :
-                                        pureL1M + pureL1E + pureL2M + pureL2E + pureL3M + pureL3E;
-
-              const isMeritEndorsed = isLevelAchieved && meritPlusCredits >= 50;
-              const isExcellenceEndorsed = isLevelAchieved && excellenceCredits >= 50;
-
-              return (
-                <View key={`ncea-row-l${lvl}`} style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
-                  <View style={[styles.tableCell, { flex: 1.1 }]}><ThemedText style={styles.rowInlineMainText}>Level {lvl}</ThemedText></View>
-                  
-                  {/* Literacy Status */}
-                  <View style={[styles.tableCell, { flex: 1.1 }]}>
-                    <ThemedText style={{ color: isLitMet ? '#10B981' : '#EF4444', fontWeight: '700', fontSize: 12 }}>
-                      {isLitMet ? 'Met' : 'Not Met'}
-                    </ThemedText>
-                  </View>
-
-                  {/* Numeracy Status */}
-                  <View style={[styles.tableCell, { flex: 1.1 }]}>
-                    <ThemedText style={{ color: isNumMet ? '#10B981' : '#EF4444', fontWeight: '700', fontSize: 12 }}>
-                      {isNumMet ? 'Met' : 'Not Met'}
-                    </ThemedText>
-                  </View>
-
-                  {/* NCEA Level Status - Orange (#D97706) when Achieved */}
-                  <View style={[styles.tableCell, { flex: 1.5 }]}>
-                    <ThemedText style={{ color: isLevelAchieved ? '#D97706' : '#64748B', fontWeight: '700', fontSize: 12 }}>
-                      {isLevelAchieved ? 'Achieved' : `${levelCredits}/60`}
-                    </ThemedText>
-                  </View>
-
-                  {/* Merit Endorsement */}
-                  <View style={[styles.tableCell, { flex: 1.8 }]}>
-                    <ThemedText style={{ color: isMeritEndorsed ? '#3B82F6' : '#64748B', fontWeight: '700', fontSize: 12 }}>
-                      {!isLevelAchieved ? 'Req. NCEA L' + lvl : isMeritEndorsed ? 'Endorsed' : `${meritPlusCredits}/50 M`}
-                    </ThemedText>
-                  </View>
-
-                  {/* Excellence Endorsement */}
-                  <View style={[styles.tableCell, { flex: 1.8 }]}>
-                    <ThemedText style={{ color: isExcellenceEndorsed ? '#10B981' : '#64748B', fontWeight: '700', fontSize: 12 }}>
-                      {!isLevelAchieved ? 'Req. NCEA L' + lvl : isExcellenceEndorsed ? 'Endorsed' : `${excellenceCredits}/50 E`}
-                    </ThemedText>
-                  </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+              <View style={styles.tableMatrixGrid}>
+                <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 90 }]}><ThemedText style={styles.headerLabelText}>Level</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 100 }]}><ThemedText style={styles.headerLabelText}>Literacy</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 100 }]}><ThemedText style={styles.headerLabelText}>Numeracy</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 130 }]}><ThemedText style={styles.headerLabelText}>NCEA Level</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140 }]}><ThemedText style={styles.headerLabelText}>Merit End.</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140 }]}><ThemedText style={styles.headerLabelText}>Excellence End.</ThemedText></View>
                 </View>
-              );
-            })}
+
+                {[1, 2, 3].map((lvl) => {
+                  const isLitMet = globalCumulativeMetrics.isUeLiteracyAchieved;
+                  const isNumMet = globalCumulativeMetrics.isUeNumeracyAchieved;
+                  const isLitNumMet = isLitMet && isNumMet;
+                  
+                  const levelCredits = lvl === 1 
+                    ? globalCumulativeMetrics.level1Achieved + globalCumulativeMetrics.level2Achieved + globalCumulativeMetrics.Level3Achieved 
+                    : lvl === 2 
+                      ? globalCumulativeMetrics.level2Achieved + globalCumulativeMetrics.Level3Achieved 
+                      : globalCumulativeMetrics.Level3Achieved;
+                                      
+                  const isLevelAchieved = levelCredits >= 60 && isLitNumMet;
+
+                  const pureL3E = globalCumulativeMetrics.Level3Excellence;
+                  const pureL2E = globalCumulativeMetrics.level2Excellence;
+                  const pureL1E = globalCumulativeMetrics.level1Excellence;
+
+                  const pureL3M = Math.max(0, globalCumulativeMetrics.level3Merit - pureL3E);
+                  const pureL2M = Math.max(0, globalCumulativeMetrics.level2Merit - pureL2E);
+                  const pureL1M = Math.max(0, globalCumulativeMetrics.level1Merit - pureL1E);
+
+                  const excellenceCredits = lvl === 3 ? pureL3E :
+                                              lvl === 2 ? pureL2E + pureL3E :
+                                              pureL1E + pureL2E + pureL3E;
+
+                  const meritPlusCredits = lvl === 3 ? pureL3M + pureL3E :
+                                            lvl === 2 ? pureL2M + pureL2E + pureL3M + pureL3E :
+                                            pureL1M + pureL1E + pureL2M + pureL2E + pureL3M + pureL3E;
+
+                  const isMeritEndorsed = isLevelAchieved && meritPlusCredits >= 50;
+                  const isExcellenceEndorsed = isLevelAchieved && excellenceCredits >= 50;
+
+                  return (
+                    <View key={`ncea-row-l${lvl}`} style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
+                      <View style={[styles.tableCell, { width: 90 }]}><ThemedText style={styles.rowInlineMainText}>Level {lvl}</ThemedText></View>
+                      
+                      <View style={[styles.tableCell, { width: 100 }]}>
+                        <ThemedText style={{ color: isLitMet ? '#10B981' : '#EF4444', fontWeight: '700', fontSize: 14 }}>
+                          {isLitMet ? 'Met' : 'Not Met'}
+                        </ThemedText>
+                      </View>
+
+                      <View style={[styles.tableCell, { width: 100 }]}>
+                        <ThemedText style={{ color: isNumMet ? '#10B981' : '#EF4444', fontWeight: '700', fontSize: 14 }}>
+                          {isNumMet ? 'Met' : 'Not Met'}
+                        </ThemedText>
+                      </View>
+
+                      <View style={[styles.tableCell, { width: 130 }]}>
+                        <ThemedText style={{ color: isLevelAchieved ? '#D97706' : '#64748B', fontWeight: '700', fontSize: 14 }}>
+                          {isLevelAchieved ? 'Achieved' : `${levelCredits}/60`}
+                        </ThemedText>
+                      </View>
+
+                      <View style={[styles.tableCell, { width: 140 }]}>
+                        <ThemedText style={{ color: isMeritEndorsed ? '#3B82F6' : '#64748B', fontWeight: '700', fontSize: 14 }}>
+                          {!isLevelAchieved ? 'Req. NCEA L' + lvl : isMeritEndorsed ? 'Endorsed' : `${meritPlusCredits}/50 M`}
+                        </ThemedText>
+                      </View>
+
+                      <View style={[styles.tableCell, { width: 140 }]}>
+                        <ThemedText style={{ color: isExcellenceEndorsed ? '#10B981' : '#64748B', fontWeight: '700', fontSize: 14 }}>
+                          {!isLevelAchieved ? 'Req. NCEA L' + lvl : isExcellenceEndorsed ? 'Endorsed' : `${excellenceCredits}/50 E`}
+                        </ThemedText>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            </ScrollView>
           </View>
 
-          {/* --- SUBJECT ENDORSEMENTS TABLE --- */}
+          {/* SUBJECT ENDORSEMENTS TABLE */}
           <View style={[styles.cardContainer, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#FFFFFF', marginTop: 16 }]}>
-            {/* Card Header with Top Right Info Note */}
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+            <View style={{ flexDirection: 'column', gap: Spacing.two, marginBottom: 12 }}>
               <ThemedText style={styles.cardHeaderTitle}>Subject Endorsements</ThemedText>
               <View style={styles.topRightInfoBox}>
                 <ThemedText style={styles.topRightInfoText}>
@@ -1287,188 +1394,190 @@ const selectedEndorsementCredits = useMemo(() => {
               </View>
             </View>
 
-            {/* Table Header with Dedicated Columns */}
-            <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-              <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.headerLabelText}>Subject</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>A (Int)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>A (Ext)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>M (Int)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>M (Ext)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>E (Int)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.headerLabelText}>E (Ext)</ThemedText></View>
-              <View style={[styles.tableCell, { flex: 1.8 }]}><ThemedText style={styles.headerLabelText}>Endorsement</ThemedText></View>
-            </View>
-
-            {/* Subject Rows */}
-            {subjectGroups.map((subj, idx) => {
-              let intA = 0, extA = 0;
-              let intM = 0, extM = 0;
-              let intE = 0, extE = 0;
-
-              subj.standards.forEach(std => {
-                const isExt = std.type?.toLowerCase().includes('ext');
-                const isInt = !isExt;
-
-                if (std.achievement === 'Achieved with Excellence') {
-                  if (isInt) intE += std.credits;
-                  if (isExt) extE += std.credits;
-                } else if (std.achievement === 'Achieved with Merit') {
-                  if (isInt) intM += std.credits;
-                  if (isExt) extM += std.credits;
-                } else if (std.achievement === 'Achieved') {
-                  if (isInt) intA += std.credits;
-                  if (isExt) extA += std.credits;
-                }
-              });
-
-              // Excellence level pool (Excellence credits only)
-              const totalE = intE + extE;
-              const hasE3Int3Ext = intE >= 3 && extE >= 3;
-
-              // Merit+ level pool (Merit + Excellence credits)
-              const totalMPlus = intM + extM + totalE;
-              const intMPlus = intM + intE;
-              const extMPlus = extM + extE;
-              const hasM3Int3Ext = intMPlus >= 3 && extMPlus >= 3;
-
-              // Achieved+ level pool (Achieved + Merit + Excellence credits)
-              const totalAPlus = intA + extA + totalMPlus;
-              const intAPlus = intA + intMPlus;
-              const extAPlus = extA + extMPlus;
-              const hasA3Int3Ext = intAPlus >= 3 && extAPlus >= 3;
-
-              let endorsementStatus = 'Not Endorsed';
-              let statusColor = '#64748B';
-
-              if (totalE >= 14 && hasE3Int3Ext) {
-                endorsementStatus = 'Excellence';
-                statusColor = '#10B981';
-              } else if (totalMPlus >= 14 && hasM3Int3Ext) {
-                endorsementStatus = 'Merit';
-                statusColor = '#3B82F6';
-              } else if (totalAPlus >= 14 && hasA3Int3Ext) {
-                endorsementStatus = 'Achieved';
-                statusColor = '#D97706';
-              }
-
-              return (
-                <View key={`subj-end-${idx}`} style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
-                  <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineMainText}>{subj.subjectName}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{intA}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{extA}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{intM}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{extM}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{intE}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 0.8 }]}><ThemedText style={styles.rowInlineMainText}>{extE}</ThemedText></View>
-                  <View style={[styles.tableCell, { flex: 1.8 }]}>
-                    <ThemedText style={{ color: statusColor, fontWeight: '700', fontSize: 12 }}>
-                      {endorsementStatus}
-                    </ThemedText>
-                  </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+              <View style={styles.tableMatrixGrid}>
+                <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.headerLabelText}>Subject</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>A (Int)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>A (Ext)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>M (Int)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>M (Ext)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>E (Int)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.headerLabelText}>E (Ext)</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140 }]}><ThemedText style={styles.headerLabelText}>Endorsement</ThemedText></View>
                 </View>
-              );
-            })}
+
+                {subjectGroups.map((subj, idx) => {
+                  const fullSubjectName = `${subj?.subjectName} ${subj?.level}`;
+                  let intA = 0, extA = 0;
+                  let intM = 0, extM = 0;
+                  let intE = 0, extE = 0;
+
+                  subj.standards.forEach(std => {
+                    const isExt = std.type?.toLowerCase().includes('ext');
+                    const isInt = !isExt;
+
+                    if (std.achievement === 'Achieved with Excellence') {
+                      if (isInt) intE += std.credits;
+                      if (isExt) extE += std.credits;
+                    } else if (std.achievement === 'Achieved with Merit') {
+                      if (isInt) intM += std.credits;
+                      if (isExt) extM += std.credits;
+                    } else if (std.achievement === 'Achieved') {
+                      if (isInt) intA += std.credits;
+                      if (isExt) extA += std.credits;
+                    }
+                  });
+
+                  const totalE = intE + extE;
+                  const hasE3Int3Ext = intE >= 3 && extE >= 3;
+
+                  const totalMPlus = intM + extM + totalE;
+                  const intMPlus = intM + intE;
+                  const extMPlus = extM + extE;
+                  const hasM3Int3Ext = intMPlus >= 3 && extMPlus >= 3;
+
+                  const totalAPlus = intA + extA + totalMPlus;
+                  const intAPlus = intA + intMPlus;
+                  const extAPlus = extA + extMPlus;
+                  const hasA3Int3Ext = intAPlus >= 3 && extAPlus >= 3;
+
+                  let endorsementStatus = 'Not Endorsed';
+                  let statusColor = '#64748B';
+
+                  if (totalE >= 14 && hasE3Int3Ext) {
+                    endorsementStatus = 'Excellence';
+                    statusColor = '#10B981';
+                  } else if (totalMPlus >= 14 && hasM3Int3Ext) {
+                    endorsementStatus = 'Merit';
+                    statusColor = '#3B82F6';
+                  } else if (totalAPlus >= 14 && hasA3Int3Ext) {
+                    endorsementStatus = 'Achieved';
+                    statusColor = '#D97706';
+                  }
+
+                  return (
+                    <View key={`subj-end-${idx}`} style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}>
+                      <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>{fullSubjectName}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{intA}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{extA}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{intM}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{extM}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{intE}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 70 }]}><ThemedText style={styles.rowInlineMainText}>{extE}</ThemedText></View>
+                      <View style={[styles.tableCell, { width: 140 }]}>
+                        <ThemedText style={{ color: statusColor, fontWeight: '700', fontSize: 14 }}>
+                          {endorsementStatus}
+                        </ThemedText>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            </ScrollView>
           </View>
 
-          {/* University Entrance & Literacy/Numeracy Requirements Status Table */}
+          {/* University Entrance Requirement Status Table */}
           <View style={[styles.ueStatusCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC' }]}>
-            <ThemedText style={[styles.analyticsHeading, { color: currentColors.text, marginBottom: 12 }]}>
+            <ThemedText style={[styles.analyticsHeading, { color: currentColors.text, marginBottom: 14 }]}>
               University Entrance Qualification Status
             </ThemedText>
 
-            <View style={styles.tableMatrixGrid}>
-              <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#CBD5E1' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.headerLabelText}>Requirement</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.headerLabelText}>Criteria</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.headerLabelText}>Progress</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}><ThemedText style={styles.headerLabelText}>Status</ThemedText></View>
-              </View>
-
-              {/* UE Reading */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>UE Reading</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>5+ Reading Credits</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueReadingCredits}/5</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.isUeReadingAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUeReadingAchieved ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+              <View style={styles.tableMatrixGrid}>
+                <View style={[styles.tableHeaderDataRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#CBD5E1' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.headerLabelText}>Requirement</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.headerLabelText}>Criteria</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.headerLabelText}>Progress</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}><ThemedText style={styles.headerLabelText}>Status</ThemedText></View>
                 </View>
-              </View>
 
-              {/* UE Writing */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>UE Writing</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>5+ Writing Credits</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueWritingCredits}/5</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.isUeWritingAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUeWritingAchieved ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+                {/* UE Reading */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>UE Reading</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>5+ Reading Credits</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueReadingCredits}/5</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.isUeReadingAchieved ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.isUeReadingAchieved ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-              {/* UE Literacy Overall */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>UE Literacy</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>5 Reading + 5 Writing</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueReadingCredits + globalCumulativeMetrics.ueWritingCredits}/10</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.isUeLiteracyAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUeLiteracyAchieved ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+                {/* UE Writing */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>UE Writing</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>5+ Writing Credits</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueWritingCredits}/5</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.isUeWritingAchieved ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.isUeWritingAchieved ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-              {/* UE Numeracy */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>UE Numeracy</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>10+ Numeracy Credits</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueNumeracyCredits}/10</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.isUeNumeracyAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUeNumeracyAchieved ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+                {/* UE Literacy Overall */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>UE Literacy</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>5 Reading + 5 Writing</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueReadingCredits + globalCumulativeMetrics.ueWritingCredits}/10</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.isUeLiteracyAchieved ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.isUeLiteracyAchieved ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-              {/* NCEA Level 3 */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>NCEA Level 3</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>60+ L3 Credits</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.Level3Achieved}/60</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.Level3Achieved > 60 ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.Level3Achieved > 60 ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+                {/* UE Numeracy */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>UE Numeracy</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>10+ Numeracy Credits</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.ueNumeracyCredits}/10</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.isUeNumeracyAchieved ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.isUeNumeracyAchieved ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-              {/* UE Approved Subjects */}
-              <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={styles.rowInlineMainText}>UE Subjects</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>14+ Credits in 3 Approved Subj</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.level3SubjectsWith14Credits}/3</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '700', color: globalCumulativeMetrics.isUniversityEntranceAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUniversityEntranceAchieved ? 'Achieved ✅' : 'In Progress'}
-                  </ThemedText>
+                {/* NCEA Level 3 */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>NCEA Level 3</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>60+ L3 Credits</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.Level3Achieved}/60</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.Level3Achieved >= 60 ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.Level3Achieved >= 60 ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-              {/* Overall University Entrance */}
-              <View style={[styles.tableRecordRow, { borderBottomWidth: 0 }]}>
-                <View style={[styles.tableCell, { flex: 2.2 }]}><ThemedText style={[styles.rowInlineMainText, { fontWeight: '800' }]}>University Entrance</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 2 }]}><ThemedText style={styles.rowInlineSubText}>L3 + UE Subj + Lit + Num</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>-</ThemedText></View>
-                <View style={[styles.tableCell, { flex: 1.5, alignItems: 'flex-end' }]}>
-                  <ThemedText style={{ fontWeight: '800', color: globalCumulativeMetrics.isUniversityEntranceAchieved ? '#10B981' : '#EF4444' }}>
-                    {globalCumulativeMetrics.isUniversityEntranceAchieved ? 'Achieved 🎉' : 'In Progress'}
-                  </ThemedText>
+                {/* UE Approved Subjects */}
+                <View style={[styles.tableRecordRow, { borderBottomColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={styles.rowInlineMainText}>UE Subjects</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>14+ Credits in 3 Approved Subj</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>{globalCumulativeMetrics.level3SubjectsWith14Credits}/3</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontSize: 14, fontWeight: '700', color: globalCumulativeMetrics.hasUeSubjectRequirement ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.hasUeSubjectRequirement ? 'Achieved ✅' : 'In Progress'}
+                    </ThemedText>
+                  </View>
                 </View>
-              </View>
 
-            </View>
+                {/* Overall University Entrance */}
+                <View style={[styles.tableRecordRow, { borderBottomWidth: 0 }]}>
+                  <View style={[styles.tableCell, { width: 180 }]}><ThemedText style={[styles.rowInlineMainText, { fontWeight: '800', fontSize: 16 }]}>University Entrance</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 220 }]}><ThemedText style={styles.rowInlineSubText}>L3 + UE Subj + Lit + Num</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 110, alignItems: 'center' }]}><ThemedText style={styles.rowInlineMainText}>-</ThemedText></View>
+                  <View style={[styles.tableCell, { width: 140, alignItems: 'flex-end' }]}>
+                    <ThemedText style={{ fontWeight: '800', fontSize: 15, color: globalCumulativeMetrics.isUniversityEntranceAchieved ? '#10B981' : '#EF4444' }}>
+                      {globalCumulativeMetrics.isUniversityEntranceAchieved ? 'Achieved 🎉' : 'In Progress'}
+                    </ThemedText>
+                  </View>
+                </View>
+
+              </View>
+            </ScrollView>
           </View>
 
         </ScrollView>
@@ -1487,73 +1596,73 @@ export const GRADE_COLORS = {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
-  scrollContainer: { padding: Spacing.four, paddingBottom: 40 },
-  pageTitle: { fontSize: 22, fontWeight: '800', marginBottom: Spacing.four },
-  errorContainer: { backgroundColor: '#FEE2E2', padding: Spacing.three, borderRadius: 8, marginBottom: Spacing.four },
-  errorText: { color: '#991B1B', fontWeight: '600' },
+  scrollContainer: { padding: Spacing.four, paddingBottom: 60 },
+  pageTitle: { fontSize: 26, fontWeight: '800', marginBottom: Spacing.four },
+  errorContainer: { backgroundColor: '#FEE2E2', padding: Spacing.four, borderRadius: 10, marginBottom: Spacing.four },
+  errorText: { color: '#991B1B', fontWeight: '600', fontSize: 15 },
   
-  metricRowContainer: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  metricTextRightBlock: { marginLeft: 4, flex: 1 },
-  percentageHeadline: { fontSize: 18, fontWeight: '800' },
-  descriptionMetaText: { fontSize: 11, marginTop: 1 },
+  metricRowContainer: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  metricTextRightBlock: { marginLeft: 6, flex: 1 },
+  percentageHeadline: { fontSize: 22, fontWeight: '800' },
+  descriptionMetaText: { fontSize: 13, marginTop: 2, fontWeight: '500' },
   cardCornerFooterTag: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
-    opacity: 0.6,
-    marginBottom: 10,
+    opacity: 0.7,
+    marginBottom: 12,
   },  
-  filteringContextToolbar: { flexDirection: 'row', gap: Spacing.two, marginBottom: Spacing.two },
-  dropdownControlCell: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: Spacing.three, borderWidth: 1, borderRadius: 8 },
-  filterValueText: { fontSize: 12, fontWeight: '600' },
-  dropdownDrawer: { padding: Spacing.two, borderRadius: 8, marginBottom: Spacing.three },
-  drawerOption: { paddingVertical: Spacing.two, paddingHorizontal: Spacing.three },
+  filteringContextToolbar: { flexDirection: 'row', gap: Spacing.three, marginBottom: Spacing.three },
+  dropdownControlCell: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: Spacing.four, borderWidth: 1, borderRadius: 10 },
+  filterValueText: { fontSize: 15, fontWeight: '700' },
+  dropdownDrawer: { padding: Spacing.three, borderRadius: 10, marginBottom: Spacing.three },
+  drawerOption: { paddingVertical: Spacing.three, paddingHorizontal: Spacing.four },
   tablesContainerWrapper: { gap: Spacing.four, marginBottom: Spacing.four },
   emptyStateContainer: { padding: Spacing.four, alignItems: 'center' },
-  subjectBlockSegment: { borderRadius: 10, overflow: 'hidden' },
-  subjectSectionHeader: { padding: Spacing.three },
-  subjectTitleText: { fontSize: 15, fontWeight: '700' },
-  subjectHeaderMetaBadge: { fontSize: 11, color: '#64748B', fontWeight: '600' },
-  tableMatrixGrid: { width: '100%' },
-  tableHeaderDataRow: { flexDirection: 'row', paddingVertical: Spacing.two, borderBottomWidth: 1 },
-  tableRecordRow: { flexDirection: 'row', paddingVertical: Spacing.two, borderBottomWidth: 1 },
-  tableCell: { justifyContent: 'center', paddingHorizontal: 2 },
-  headerLabelText: { fontSize: 11, fontWeight: '700', color: '#64748B' },
-  rowInlineMainText: { fontSize: 12 },
-  rowInlineSubText: { fontSize: 10, color: '#64748B' },
-  pieChartAnalyticsCard: { flexDirection: 'row', padding: Spacing.four, borderRadius: 12, marginTop: Spacing.two },
-  ueStatusCard: { padding: Spacing.four, borderRadius: 12, marginTop: Spacing.three },
-  analyticsHeading: { fontSize: 16, fontWeight: '800' },
-  legendRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, marginVertical: 2 },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
-  legendText: { fontSize: 13 },
+  subjectBlockSegment: { borderRadius: 12, overflow: 'hidden', marginBottom: Spacing.two },
+  subjectSectionHeader: { padding: Spacing.four },
+  subjectTitleText: { fontSize: 18, fontWeight: '800' },
+  subjectHeaderMetaBadge: { fontSize: 13, color: '#64748B', fontWeight: '700' },
+  tableMatrixGrid: { minWidth: '100%' },
+  tableHeaderDataRow: { flexDirection: 'row', paddingVertical: Spacing.three, borderBottomWidth: 1.5 },
+  tableRecordRow: { flexDirection: 'row', paddingVertical: Spacing.three, borderBottomWidth: 1 },
+  tableCell: { justifyContent: 'center', paddingHorizontal: 6 },
+  headerLabelText: { fontSize: 13, fontWeight: '800', color: '#64748B' },
+  rowInlineMainText: { fontSize: 14, fontWeight: '500' },
+  rowInlineSubText: { fontSize: 12, color: '#64748B' },
+  pieChartAnalyticsCard: { flexDirection: 'row', padding: Spacing.four, borderRadius: 14, marginTop: Spacing.three },
+  ueStatusCard: { padding: Spacing.four, borderRadius: 14, marginTop: Spacing.three },
+  analyticsHeading: { fontSize: 19, fontWeight: '800' },
+  legendRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three, marginVertical: 4 },
+  legendDot: { width: 12, height: 12, borderRadius: 6 },
+  legendText: { fontSize: 15 },
 
   statsMetricsWrapper: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    gap: 14,
     marginBottom: 24,
   },
   metricItemCard: {
-    flexBasis: '48%',
+    flexBasis: '47%',
     flexGrow: 1,
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     position: 'relative',
     justifyContent: 'space-between',
-    minHeight: 120,
+    minHeight: 140,
   },
   centeredMetricRowContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-start',
-    marginTop: 4,
+    marginTop: 6,
     gap: 12,
   },
   metricItemCardFullWidth: {
     flexBasis: '100%',
     borderRadius: 16,
-    padding: 14,
-    minHeight: 110,
+    padding: 16,
+    minHeight: 130,
     justifyContent: 'center',
   },
   cardHeaderRow: {
@@ -1564,90 +1673,89 @@ const styles = StyleSheet.create({
   },
   floatingControlsContainer: {
     position: 'absolute',
-    top: 10,
-    right: 10,
+    top: 12,
+    right: 12,
     flexDirection: 'row',
-    gap: 4,
+    gap: 6,
     zIndex: 10,
   },
   targetSubText: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '500',
     opacity: 0.6,
   },
   selectorPillGroup: {
     flexDirection: 'row',
     backgroundColor: 'rgba(148, 163, 184, 0.2)',
-    borderRadius: 6,
-    padding: 2,
-    gap: 2,
+    borderRadius: 8,
+    padding: 3,
+    gap: 3,
   },
   selectorPill: {
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
   selectorPillText: {
-    fontSize: 9,
-    fontWeight: '600',
-    opacity: 0.7,
+    fontSize: 12,
+    fontWeight: '700',
+    opacity: 0.8,
   },
   ueSubjectsGridRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 6,
   },
   ueSubjectRingItem: {
     alignItems: 'center',
     flex: 1,
   },
   ueSubjectCreditsText: {
-    fontSize: 11,
+    fontSize: 14,
     fontWeight: '800',
-    marginTop: 3,
+    marginTop: 4,
   },
   ueSubjectNameText: {
-    fontSize: 9,
-    fontWeight: '500',
+    fontSize: 11,
+    fontWeight: '600',
     textAlign: 'center',
-    marginTop: 2,
-    maxWidth: 60,
+    marginTop: 3,
+    maxWidth: 70,
   },
   cardContainer: {
-    padding: 16,
-    borderRadius: 12,
-    marginVertical: 10,
+    padding: 18,
+    borderRadius: 14,
+    marginVertical: 12,
   },
   cardHeaderTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 8,
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 10,
   },
   warningBanner: {
     backgroundColor: 'rgba(217, 119, 6, 0.1)',
     borderColor: '#D97706',
     borderWidth: 1,
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 12,
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 14,
   },
   warningBannerText: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#D97706',
-    lineHeight: 16,
+    lineHeight: 18,
   },
   topRightInfoBox: {
-  backgroundColor: 'rgba(59, 130, 246, 0.08)',
-  borderColor: '#3B82F6',
-  borderWidth: 1,
-  padding: 6,
-  borderRadius: 6,
-  maxWidth: '55%',
+    backgroundColor: 'rgba(59, 130, 246, 0.08)',
+    borderColor: '#3B82F6',
+    borderWidth: 1,
+    padding: 8,
+    borderRadius: 8,
   },
   topRightInfoText: {
-    fontSize: 10,
+    fontSize: 12,
     color: '#3B82F6',
-    lineHeight: 13,
+    lineHeight: 16,
   },
 });

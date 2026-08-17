@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Spacing } from '@/constants/theme';
-import { ChevronLeft, ChevronRight, CheckCircle2, UserCheck, X } from 'lucide-react-native';
+import { ChevronLeft, ChevronRight, CheckCircle2, UserCheck, X, Info } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '../../_context';
 
@@ -32,9 +32,9 @@ const DEFAULT_LINES_CONFIG: Record<TimetableLine, LineConfig> = {
   'Line 1':  { name: 'Line 1',  color: '#F3E8FF', darkColor: '#2D2245' }, // Purple
   'Line 2':  { name: 'Line 2',  color: '#DBEAFE', darkColor: '#1E2E4A' }, // Blue
   'Line 3':  { name: 'Line 3',  color: '#FEE2E2', darkColor: '#3C2020' }, // Red
-  'Line 4':  { name: 'Line 4',  color: '#FEF08A', darkColor: '#3A361A' }, // Yellow
+  'Line 4':  { name: 'Line 4',  color: '#FEF08A', darkColor: '#423200' }, // Bright Yellow
   'Line 5':  { name: 'Line 5',  color: '#D1FAE5', darkColor: '#143324' }, // Green
-  'Line 6':  { name: 'Line 6',  color: '#FEF3C7', darkColor: '#3A311D' }, // Amber
+  'Line 6':  { name: 'Line 6',  color: '#FEF3C7', darkColor: '#362405' }, // Toasted Amber / Ochre
   'Line 7':  { name: 'Line 7',  color: '#E0E7FF', darkColor: '#1E1B4B' }, // Indigo
   'Line 8':  { name: 'Line 8',  color: '#E0F2FE', darkColor: '#0C4A6E' }, // Sky Blue
   'Line 9':  { name: 'Line 9',  color: '#FCE7F3', darkColor: '#4A044E' }, // Pink
@@ -100,6 +100,15 @@ const STATUS_CODES: Record<AttendanceStatus, string> = {
   'Not Done Yet': '-',
 };
 
+const STATUS_DESCRIPTIONS: Record<AttendanceStatus, string> = {
+  Present: 'Present in class',
+  Late: 'Arrived after scheduled start time',
+  'Unjustified Absence': 'Unexplained or unexcused absence',
+  'Justified Absence': 'Excused leave or medical cause',
+  'Exam Leave': 'Authorized exam study leave',
+  'Not Done Yet': 'Attendance has not been recorded',
+};
+
 const STATUS_COLORS: Record<AttendanceStatus, string> = {
   Present: '#22C55E',
   Late: '#3B82F6',
@@ -133,11 +142,12 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
 
   // Attendance Modal States
   const [markingModalVisible, setMarkingModalVisible] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
   const [activeSlotLine, setActiveSlotLine] = useState<string>('');
   const [activeClassForModal, setActiveClassForModal] = useState<ClassRecord | null>(null);
   const [enrolledStudents, setEnrolledStudents] = useState<StudentRecord[]>([]);
   const [studentDayAttendance, setStudentDayAttendance] = useState<Record<number, string[]>>({});
-  const [selectedAttendance, setSelectedAttendance] = useState<Record<number, AttendanceStatus>>({});
+  const [selectedAttendance, setSelectedAttendance] = useState<Record<number, AttendanceStatus | undefined>>({});
   const [submittingAttendance, setSubmittingAttendance] = useState(false);
 
   useEffect(() => {
@@ -160,7 +170,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
     async function initTeacherCalendar() {
       setLoading(true);
       try {
-        // Link teacher email to teacher_code
         const { data: teacherData, error: teacherErr } = await supabase
           .from('teacher_personal_information')
           .select('teacher_code, first_name_preferred, last_name_legal, teacher_email')
@@ -172,16 +181,14 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
         }
         setTeacher(teacherData);
 
-        // Fetch classes taught by this teacher OR school break slots
         const { data: classData, error: classErr } = await supabase
-        .from('classes')
-        .select('id, subject, level, line, teacher_code, is_break')
-        .or(`teacher_code.eq.${teacherData.teacher_code},is_break.eq.true`);
+          .from('classes')
+          .select('id, subject, level, line, teacher_code, is_break')
+          .or(`teacher_code.eq.${teacherData.teacher_code},is_break.eq.true`);
 
         if (classErr) throw classErr;
         setTeacherClasses(classData || []);
         
-        // Fetch Master Timetable Lines
         const { data: dbLines, error: linesError } = await supabase
           .from('lines')
           .select('day, line, start_time, end_time')
@@ -208,7 +215,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           setTimetableByDay(mappedTimetable);
         }
 
-        // Fetch Academic Calendar
         const { data: dbCalendar, error: calError } = await supabase
           .from('calendar')
           .select('date, day, week, term')
@@ -231,9 +237,20 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           });
 
           setCalendarDays(formattedDays);
+
           const todayStr = new Date().toISOString().split('T')[0];
-          const todayIdx = formattedDays.findIndex((d) => d.date === todayStr);
-          setDayIndex(todayIdx !== -1 ? todayIdx : 0);
+          
+          let targetIdx = formattedDays.findIndex((d) => d.date === todayStr);
+
+          if (targetIdx === -1) {
+            targetIdx = formattedDays.findIndex((d) => d.date > todayStr);
+          }
+
+          if (targetIdx === -1) {
+            targetIdx = formattedDays.length - 1;
+          }
+
+          setDayIndex(targetIdx);
         }
       } catch (err) {
         console.error('Error fetching teacher calendar data:', err);
@@ -255,7 +272,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
 
   // 2. Open Attendance Sheet dynamically per specific Line Slot
   const openAttendanceModal = async (lineKey: string) => {
-    // Find class matching this line key
     const targetLineNum = lineKey.replace('Line ', '').trim();
     const matchedClass = teacherClasses.find((c) => String(c.line) === targetLineNum || `Line ${c.line}` === lineKey);
 
@@ -263,11 +279,12 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
 
     setActiveSlotLine(lineKey);
     setActiveClassForModal(matchedClass);
+    // Reset selection map so attendance defaults to unselected
     setSelectedAttendance({});
+    setShowLegend(false);
     setMarkingModalVisible(true);
 
     try {
-      // Step A: Get enrolled student IDs for THIS class
       const { data: classStudents, error: classStudentsErr } = await supabase
         .from('classes_students')
         .select('student_id')
@@ -278,7 +295,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
       let studentList: StudentRecord[] = [];
 
       if (studentIds.length > 0) {
-        // Step B: Fetch student profiles
         const { data: profiles, error: profileErr } = await supabase
           .from('student_personal_information')
           .select('student_id, first_name_legal, last_name_legal, first_name_preferred')
@@ -286,7 +302,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
 
         if (profileErr) throw profileErr;
 
-        // Step C: Generate file paths & Batch-fetch signed photo URLs
         const filePaths = (profiles || []).map((s) => `students/${s.student_id}.jpg`);
         const { data: signedData, error: signedErr } = await supabase.storage
           .from('id_photos')
@@ -296,7 +311,6 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           console.warn('Error fetching signed URLs from id_photos:', signedErr);
         }
 
-        // Pair signed URLs safely
         studentList = (profiles || []).map((student) => {
           const path = `students/${student.student_id}.jpg`;
           const signedItem = signedData?.find((item) => item.path === path);
@@ -306,10 +320,9 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           };
         });
 
-        // Step D: Fetch TODAY'S existing attendance entries for history badges
         const { data: existingAttendance, error: attErr } = await supabase
           .from('attendance')
-          .select('student_id, status')
+          .select('student_id, status, line')
           .eq('date', activeDayRecord.date)
           .in('student_id', studentIds);
 
@@ -317,15 +330,23 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           console.warn('Error fetching today attendance history:', attErr);
         } else {
           const attendanceMap: Record<number, string[]> = {};
+          const currentSlotSelections: Record<number, AttendanceStatus> = {};
+
           (existingAttendance || []).forEach((record) => {
             if (!attendanceMap[record.student_id]) {
               attendanceMap[record.student_id] = [];
             }
             const statusCode = STATUS_CODES[record.status as AttendanceStatus] || record.status;
             attendanceMap[record.student_id].push(statusCode);
+
+            // Pre-fill selection ONLY if recorded for this specific line slot
+            if (String(record.line) === targetLineNum) {
+              currentSlotSelections[record.student_id] = record.status as AttendanceStatus;
+            }
           });
 
           setStudentDayAttendance(attendanceMap);
+          setSelectedAttendance(currentSlotSelections);
         }
       }
 
@@ -335,7 +356,7 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
     }
   };
 
-  // 3. Save Attendance with Default "Present"
+  // 3. Save Attendance without forced defaults
   const submitAttendance = async () => {
     if (!activeClassForModal || enrolledStudents.length === 0) return;
     setSubmittingAttendance(true);
@@ -343,15 +364,19 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
     try {
       const lineNum = activeSlotLine.replace('Line ', '').trim();
 
-      const recordsToInsert = enrolledStudents.map((student) => {
-        const markedStatus = selectedAttendance[student.student_id] || 'Present';
-        return {
+      const recordsToInsert = enrolledStudents
+        .filter((student) => selectedAttendance[student.student_id] !== undefined)
+        .map((student) => ({
           date: activeDayRecord.date,
           line: Number(lineNum),
           student_id: student.student_id,
-          status: markedStatus,
-        };
-      });
+          status: selectedAttendance[student.student_id] as AttendanceStatus,
+        }));
+
+      if (recordsToInsert.length === 0) {
+        setMarkingModalVisible(false);
+        return;
+      }
 
       const { error } = await supabase
         .from('attendance')
@@ -379,10 +404,8 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
       const calculatedTop = (startTotalMinutes - START_ANCHOR_MINUTES) * MINUTE_HEIGHT_RATIO;
       const calculatedHeight = ((endH * 60 + endM) - startTotalMinutes) * MINUTE_HEIGHT_RATIO;
 
-      // Extract raw number digits from "Line 6" -> 6
       const slotLineNum = slot.lineKey.replace(/\D/g, '').trim();
 
-      // Match against teacherClasses by converting both to String or Number
       const activeClass = teacherClasses.find(
         (c) => String(c.line).trim() === slotLineNum
       );
@@ -399,7 +422,7 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
           ? (isBreak ? activeClass.subject : `${activeClass.subject} (${slot.lineKey})`) 
           : slot.lineKey,
         time: slot.displayTime,
-        isAssigned: !!activeClass && !isBreak, // Disables attendance modal/badge for break slots
+        isAssigned: !!activeClass && !isBreak,
         top: calculatedTop,
         height: calculatedHeight,
         backgroundColor: cardBgColor,
@@ -525,21 +548,49 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: colorScheme === 'dark' ? '#0F172A' : '#FFFFFF' }]}>
             <View style={styles.modalHeader}>
-              <View>
+              <View style={styles.modalTitleContainer}>
                 <ThemedText style={[styles.modalTitle, { color: currentColors.text }]}>Mark Class Attendance</ThemedText>
-                <ThemedText style={{ color: currentColors.textSecondary, fontSize: 13 }}>
-                  Session: {activeSlotLine} ({activeDayRecord.date})
-                </ThemedText>
+                <TouchableOpacity
+                  onPress={() => setShowLegend((prev) => !prev)}
+                  style={[styles.infoIconButton, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F1F5F9' }]}
+                  hitSlop={8}
+                >
+                  <Info size={16} color={currentColors.text} />
+                </TouchableOpacity>
               </View>
+              
               <TouchableOpacity onPress={() => setMarkingModalVisible(false)}>
                 <X size={24} color={currentColors.text} />
               </TouchableOpacity>
             </View>
+
+            <ThemedText style={{ color: currentColors.textSecondary, fontSize: 13, marginBottom: 8 }}>
+              Session: {activeSlotLine} ({activeDayRecord.date})
+            </ThemedText>
+
+            {/* Attendance Key Explanation Card */}
+            {showLegend && (
+              <View style={[styles.legendCard, { backgroundColor: colorScheme === 'dark' ? '#1E293B' : '#F8FAFC', borderColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
+                <ThemedText style={[styles.legendTitle, { color: currentColors.text }]}>Attendance Code Key</ThemedText>
+                {(['Present', 'Late', 'Unjustified Absence', 'Justified Absence', 'Exam Leave'] as AttendanceStatus[]).map((st) => (
+                  <View key={st} style={styles.legendRow}>
+                    <View style={[styles.codeBadge, { backgroundColor: STATUS_COLORS[st] }]}>
+                      <ThemedText style={styles.codeBadgeText}>{STATUS_CODES[st]}</ThemedText>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <ThemedText style={[styles.legendName, { color: currentColors.text }]}>{st}</ThemedText>
+                      <ThemedText style={[styles.legendDesc, { color: currentColors.textSecondary }]}>{STATUS_DESCRIPTIONS[st]}</ThemedText>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
             <ScrollView style={{ flex: 1, marginVertical: 12 }}>
               {enrolledStudents.map((student) => {
                 const displayName = `${student.first_name_preferred || student.first_name_legal} ${student.last_name_legal}`;
                 const priorBadges = studentDayAttendance[student.student_id] || [];
-                const currentSelection = selectedAttendance[student.student_id] || 'Present';
+                const currentSelection = selectedAttendance[student.student_id]; // Defaults to undefined
                 return (
                   <View key={student.student_id} style={[styles.studentRow, { borderColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
                     <View style={styles.studentInfo}>
@@ -576,13 +627,21 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
                         return (
                           <TouchableOpacity
                             key={status}
-                            onPress={() => setSelectedAttendance((prev) => ({ ...prev, [student.student_id]: status }))}
+                            onPress={() =>
+                              setSelectedAttendance((prev) => ({
+                                ...prev,
+                                [student.student_id]: active ? undefined : status, // Toggle selection
+                              }))
+                            }
                             style={[
                               styles.statusButton,
-                              { backgroundColor: active ? STATUS_COLORS[status] : 'transparent', borderColor: STATUS_COLORS[status] },
+                              {
+                                backgroundColor: active ? STATUS_COLORS[status] : 'transparent',
+                                borderColor: active ? STATUS_COLORS[status] : (colorScheme === 'dark' ? '#475569' : '#CBD5E1'),
+                              },
                             ]}
                           >
-                            <ThemedText style={{ fontSize: 11, fontWeight: '700', color: active ? '#FFF' : STATUS_COLORS[status] }}>
+                            <ThemedText style={{ fontSize: 11, fontWeight: '700', color: active ? '#FFF' : (colorScheme === 'dark' ? '#94A3B8' : '#64748B') }}>
                               {STATUS_CODES[status]}
                             </ThemedText>
                           </TouchableOpacity>
@@ -600,7 +659,7 @@ export function TeacherCalendar({ mode = 'day' }: TeacherCalendarProps) {
               ) : (
                 <>
                   <CheckCircle2 size={18} color="#FFF" />
-                  <ThemedText style={styles.submitText}>Save & Mark Unmarked as Present</ThemedText>
+                  <ThemedText style={styles.submitText}>Save Attendance</ThemedText>
                 </>
               )}
             </TouchableOpacity>
@@ -631,25 +690,6 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '800',
     letterSpacing: -0.3,
-  },
-  subLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: Spacing.two,
-    marginBottom: 6,
-  },
-  classSelectorRow: {
-    flexDirection: 'row',
-  },
-  classChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    marginRight: 8,
-  },
-  classChipText: {
-    fontSize: 13,
-    fontWeight: '700',
   },
   timetableSubHeaderCentered: {
     flexDirection: 'row',
@@ -760,11 +800,59 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingBottom: 12,
+    paddingBottom: 4,
+  },
+  modalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: '800',
+  },
+  infoIconButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  legendCard: {
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginVertical: 6,
+    gap: 8,
+  },
+  legendTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  legendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  codeBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  codeBadgeText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  legendName: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  legendDesc: {
+    fontSize: 11,
   },
   studentRow: {
     flexDirection: 'column',

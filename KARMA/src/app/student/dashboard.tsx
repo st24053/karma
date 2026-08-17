@@ -1,11 +1,16 @@
-import { StyleSheet, useColorScheme, View, useWindowDimensions, Image, ScrollView } from 'react-native';
+import { StyleSheet, useColorScheme, View, useWindowDimensions, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
+import { useState, useEffect } from 'react';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
-import { CalendarCheck, Dumbbell, GraduationCap, UsersRound, ChevronLeft, ChevronRight } from 'lucide-react-native';
-import { Calendar } from '@/components/ui/calendar'; // Updated import path
+import { CalendarCheck, GraduationCap } from 'lucide-react-native';
+import { Calendar } from '@/components/ui/calendar';
+import { Announcements } from '@/components/ui/announcements'; // Adjust path if needed
+
+import { supabase } from '@/lib/supabase'; // Adjust path
+import { useAuth } from '../../_context';  // Adjust path
+import React from 'react';
 
 export default function HomeScreen() {
   const systemScheme = useColorScheme();
@@ -14,35 +19,90 @@ export default function HomeScreen() {
 
   const { width: windowWidth } = useWindowDimensions();
   const isWideScreen = windowWidth >= 768;
+  const { email: userEmail } = useAuth();
+  const [attendancePercentage, setAttendancePercentage] = useState<string>('--%');
+  const [lastGrade, setLastGrade] = useState<string>('--');
+  const [loadingStats, setLoadingStats] = useState<boolean>(true);
+
+  useEffect(() => {
+    async function fetchDashboardStats() {
+      if (!userEmail) return;
+      setLoadingStats(true);
+
+      try {
+        // 1. Get student_id using user email
+        const { data: student, error: studentError } = await supabase
+          .from('student_personal_information')
+          .select('student_id, nsn')
+          .eq('email', userEmail)
+          .maybeSingle();
+
+        if (studentError || !student?.student_id) {
+          throw new Error('Student record not found.');
+        }
+
+        const studentId = student.student_id;
+        const studentNsn = student.nsn;
+
+        // 2. Fetch all attendance records for full-year calculation
+        const { data: attendanceData, error: attendanceError } = await supabase
+          .from('attendance')
+          .select('status')
+          .eq('student_id', studentId);
+
+        if (!attendanceError && attendanceData && attendanceData.length > 0) {
+          const presentCount = attendanceData.filter((rec) =>
+            ['present', 'attended', 'late', 'tardy'].includes(rec.status?.toLowerCase())
+          ).length;
+
+          const totalAttendanceCount = attendanceData.filter((rec) =>
+            !['not done yet', ''].includes(rec.status?.toLowerCase())
+          ).length;
+
+          const percentage = Math.round((presentCount / totalAttendanceCount) * 100);
+          setAttendancePercentage(`${percentage}%`);
+        } else {
+          setAttendancePercentage('N/A');
+        }
+
+        // 3. Fetch latest grade
+        const { data: gradeData, error: gradeError } = await supabase
+          .from('grades')
+          .select('grade, date_obtained')
+          .eq('nsn', studentNsn)
+          .order('date_obtained', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!gradeError && gradeData?.grade) {
+          setLastGrade(gradeData.grade);
+        } else {
+          setLastGrade('N/A');
+        }
+      } catch (err) {
+        console.error('Error fetching dashboard stats:', err);
+      } finally {
+        setLoadingStats(false);
+      }
+    }
+
+    fetchDashboardStats();
+  }, [userEmail]);
 
   const statsData = [
     {
-      label: 'Attendance',
-      stat: '97%',
+      label: 'Attendance This Year',
+      stat: loadingStats ? '...' : attendancePercentage,
       icon: CalendarCheck,
       iconBgColor: colorScheme === 'dark' ? '#142E1F' : '#B2E5C5',
       accentColor: colorScheme === 'dark' ? '#3CD070' : '#00A662',
     },
     {
-      label: 'Exercise This Week',
-      stat: '234m',
-      icon: Dumbbell,
-      iconBgColor: colorScheme === 'dark' ? '#3A2312' : '#FFEDD4',
-      accentColor: colorScheme === 'dark' ? '#FFA654' : '#FF8D28',
-    },
-    {
       label: 'Last Grade',
-      stat: 'E',
+      stat: loadingStats ? '...' : lastGrade,
       icon: GraduationCap,
       iconBgColor: colorScheme === 'dark' ? '#132548' : '#DBEAFE',
       accentColor: colorScheme === 'dark' ? '#60A5FA' : '#155DFC',
-    },
-    {
-      label: 'Active Clubs',
-      stat: '5',
-      icon: UsersRound,
-      iconBgColor: colorScheme === 'dark' ? '#2D163D' : '#F3E8FF',
-      accentColor: colorScheme === 'dark' ? '#F472D0' : '#D732A8',
     },
   ];
 
@@ -100,46 +160,27 @@ export default function HomeScreen() {
             { flexDirection: isWideScreen ? 'row' : 'column' }
           ]}>
             
-            {/* --- ANNOUNCEMENTS ELEMENT --- */}
+            {/* --- ANNOUNCEMENTS ELEMENT (Flexible Left Column) --- */}
             <View style={[
-              styles.contentBlockCard, 
-              { backgroundColor: currentColors.backgroundElement, flex: isWideScreen ? 1.1 : undefined, shadowColor: colorScheme === 'dark' ? '#000000' : '#0f172a' }
+              styles.contentBlockCard,
+              styles.announcementsBlock,
+              { 
+                backgroundColor: currentColors.backgroundElement, 
+                shadowColor: colorScheme === 'dark' ? '#000000' : '#0f172a' 
+              }
             ]}>
-              <ThemedText style={[styles.blockTitle, { color: currentColors.text, textAlign: 'center' }]}>Announcements</ThemedText>
-              
-              <View style={styles.dateNavigationCentered}>
-                <ChevronLeft size={16} color={currentColors.textSecondary} />
-                <ThemedText style={[styles.dateTextUnified, { color: currentColors.text }]}>13th Of May, 2026</ThemedText>
-                <ChevronRight size={16} color={currentColors.textSecondary} />
-              </View>
-
-              <View style={[styles.announcementInnerBox, { borderColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]}>
-                <ThemedText style={[styles.announcementHeader, { color: currentColors.text }]}>
-                  Regarding Year 13 Student Led Conferences
-                </ThemedText>
-                
-                <View style={styles.authorRow}>
-                  <ThemedText style={[styles.authorText, { color: currentColors.textSecondary }]}>by Mimi Moss</ThemedText>
-                  <Image 
-                    source={{ uri: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150' }} 
-                    style={styles.authorAvatar} 
-                  />
-                </View>
-
-                <View style={[styles.dividerLine, { backgroundColor: colorScheme === 'dark' ? '#334155' : '#E2E8F0' }]} />
-
-                <ThemedText style={[styles.bodyTextContent, { color: currentColors.text }]}>
-                  Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book.
-                </ThemedText>
-              </View>
+              <Announcements />
             </View>
 
-            {/* --- ATTENDANCE & TIMETABLE ELEMENT --- */}
+            {/* --- CALENDAR ELEMENT (Fixed Right Column) --- */}
             <View style={[
-              styles.contentBlockCard, 
-              { backgroundColor: currentColors.backgroundElement, flex: isWideScreen ? 0.9 : undefined, shadowColor: colorScheme === 'dark' ? '#000000' : '#0f172a' }
+              styles.contentBlockCard,
+              styles.calendarBlock,
+              { 
+                backgroundColor: currentColors.backgroundElement, 
+                shadowColor: colorScheme === 'dark' ? '#000000' : '#0f172a' 
+              }
             ]}>
-              {/* Renders the full synchronized calendar directly in Day Mode */}
               <Calendar mode="day" />
             </View>
           </View>
@@ -217,11 +258,10 @@ const styles = StyleSheet.create({
   lowerDashboardContainer: {
     width: '100%',
     gap: Spacing.five,
-    alignItems: 'flex-start',
+    alignItems: 'stretch', // Ensures uniform height alignment on wide screens
     marginBottom: Spacing.six,
   },
   contentBlockCard: {
-    width: '100%',
     borderRadius: Spacing.four,
     padding: Spacing.four,
     shadowOffset: { width: 0, height: 8 },
@@ -229,60 +269,12 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 3,
   },
-  blockTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: -0.3,
+  announcementsBlock: {
+    flex: 1,
+    minWidth: 300,
   },
-  dateNavigationCentered: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.three,
-    marginTop: Spacing.three,
-    marginBottom: Spacing.four,
-  },
-  announcementInnerBox: {
-    borderWidth: 1,
-    borderRadius: Spacing.three,
-    padding: Spacing.four,
-  },
-  announcementHeader: {
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
-    textAlign: 'center',
-  },
-    dateTextUnified: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  authorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.two,
-    marginTop: Spacing.three,
-  },
-  authorText: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  authorAvatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-  },
-  dividerLine: {
-    height: 1,
-    marginVertical: Spacing.three,
-    width: '60%',
-    alignSelf: 'center',
-  },
-  bodyTextContent: {
-    fontSize: 14,
-    lineHeight: 22,
-    opacity: 0.85,
-    textAlign: 'center',
+  calendarBlock: {
+    flexShrink: 0,
+    minWidth: 350, // Holds the full width of the calendar modal
   },
 });
